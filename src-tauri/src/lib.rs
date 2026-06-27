@@ -14,9 +14,10 @@ mod tray;
 mod windows;
 
 use config::Config;
-use engine::{Engine, Rollup, SessionView, Transition};
+use engine::{Engine, HookEvent, Rollup, SessionView, Transition};
 use notify::Notifier;
 use serde::Serialize;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -35,6 +36,10 @@ struct AppState {
     /// (`unblock`) and swap in a new one.
     listener: Mutex<Option<Arc<Server>>>,
     notifier: Notifier,
+    /// Hook events flow listener → this channel → the `beacon-events` worker.
+    /// Keeping the listener thread off the engine/notify work means one
+    /// session's processing can never stall another's ingestion.
+    events: Sender<HookEvent>,
 }
 
 /// What the webview receives on every update.
@@ -65,25 +70,36 @@ fn on_transition(app: &AppHandle, t: &Transition) {
     state.notifier.fire(app, &cfg, t);
 }
 
-/// Build and start a listener on `port`, wiring its callbacks back into the
-/// engine + notifier. Returns the server handle (or a bind error).
+/// Apply one hook event and propagate its effects. Runs on the `beacon-events`
+/// worker thread (never the listener thread), so heavy work — tray updates,
+/// emits, OS notifications — can't delay ingestion of the next session's events.
+fn process_event(app: &AppHandle, ev: HookEvent) {
+    let outcome = {
+        let state = app.state::<AppState>();
+        let mut eng = state.engine.lock().expect("engine mutex poisoned");
+        eng.apply(&ev)
+    };
+    if outcome.changed {
+        refresh(app);
+    }
+    if let Some(t) = outcome.transition {
+        on_transition(app, &t);
+    }
+}
+
+/// Build and start a listener on `port`. The hook callback does the minimum —
+/// hand the event to the worker channel and return — so the listener thread is
+/// always free to accept the next request. Returns the server handle (or a bind
+/// error). The `/state` readback closure reports the current rollup + snapshot.
 fn spawn_listener(app: &AppHandle, port: u16) -> std::io::Result<Arc<Server>> {
-    let event_handle = app.clone();
+    let tx = app.state::<AppState>().events.clone();
     let state_handle = app.clone();
     listener::start(
         port,
         move |ev| {
-            let outcome = {
-                let state = event_handle.state::<AppState>();
-                let mut eng = state.engine.lock().expect("engine mutex poisoned");
-                eng.apply(&ev)
-            };
-            if outcome.changed {
-                refresh(&event_handle);
-            }
-            if let Some(t) = outcome.transition {
-                on_transition(&event_handle, &t);
-            }
+            // Non-blocking: just enqueue. Ordering is preserved (single sender
+            // per listener, single receiver).
+            let _ = tx.send(ev);
         },
         move || {
             let state = state_handle.state::<AppState>();
@@ -258,6 +274,11 @@ fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Hook events flow: listener thread → this channel → the `beacon-events`
+    // worker (spawned in setup, owns `rx`). Created here so the sender can live
+    // in AppState and the receiver can move into the setup closure.
+    let (tx, rx) = std::sync::mpsc::channel::<HookEvent>();
+
     tauri::Builder::default()
         // Single-instance must be registered first: a second launch just
         // surfaces the existing settings window instead of fighting over the
@@ -285,6 +306,7 @@ pub fn run() {
             config: Mutex::new(Config::default()),
             listener: Mutex::new(None),
             notifier: Notifier::new(),
+            events: tx,
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
@@ -302,8 +324,20 @@ pub fn run() {
             widget_hide,
             widget_toggle
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
+
+            // Drain hook events on a dedicated worker thread, in receive order.
+            // The listener only enqueues; all engine/refresh/notify work happens
+            // here, so one session can never block another's ingestion.
+            let worker_handle = handle.clone();
+            std::thread::Builder::new()
+                .name("beacon-events".into())
+                .spawn(move || {
+                    for ev in rx {
+                        process_event(&worker_handle, ev);
+                    }
+                })?;
 
             // Load persisted config and align runtime state with it.
             let cfg = config::load(&handle);

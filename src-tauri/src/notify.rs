@@ -62,11 +62,22 @@ impl Notifier {
             State::Working => format!("{} is working", t.label),
             State::Ready => format!("{} is ready", t.label),
         };
+        let sound = if pref.sound {
+            Some(pref.sound_name.clone())
+        } else {
+            None
+        };
 
-        let mut builder = app.notification().builder().title("Beacon").body(body);
-        if pref.sound {
-            builder = builder.sound(pref.sound_name.clone());
-        }
-        let _ = builder.show();
+        // Show on a detached thread: the OS Notification Center can be slow to
+        // return, and we never want that to stall the event worker (which would
+        // delay other sessions' state updates).
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let mut builder = app.notification().builder().title("Beacon").body(body);
+            if let Some(name) = sound {
+                builder = builder.sound(name);
+            }
+            let _ = builder.show();
+        });
     }
 }

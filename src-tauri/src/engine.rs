@@ -146,10 +146,15 @@ impl Engine {
                 }
             }
             "Notification" => match ev.notification_type.as_deref() {
-                Some("permission_prompt")
-                | Some("elicitation_dialog")
-                | Some("idle_prompt") => self.transition_to(ev, State::NeedsYou),
-                // auth_success, elicitation_complete, etc. → no state change.
+                // Only a genuine block on the user is "Needs you".
+                Some("permission_prompt") | Some("elicitation_dialog") => {
+                    self.transition_to(ev, State::NeedsYou)
+                }
+                // `idle_prompt` fires when a session has merely been sitting
+                // idle — it is NOT blocked on the user. Leave its state alone
+                // (a finished turn stays Ready/green; a pending permission stays
+                // red); the stale sweep greys it out after the timeout.
+                // auth_success, elicitation_complete, etc. are likewise ignored.
                 _ => ApplyOutcome {
                     changed: false,
                     transition: None,
@@ -408,6 +413,26 @@ mod tests {
         // A second permission prompt while already NeedsYou: NO transition.
         let out = e.apply(&notif("a", "permission_prompt"));
         assert!(out.transition.is_none(), "repeat must not re-notify");
+    }
+
+    #[test]
+    fn idle_prompt_does_not_turn_red() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        // A finished turn is Ready/green.
+        e.apply(&ev("SessionStart", "a"));
+        assert_eq!(e.rollup(), Rollup::Green);
+
+        // An idle_prompt must NOT flip it to red, and must not be a transition.
+        let out = e.apply(&notif("a", "idle_prompt"));
+        assert!(out.transition.is_none(), "idle_prompt should not transition");
+        assert_eq!(e.rollup(), Rollup::Green, "idle session stays green");
+
+        // A genuine permission prompt still turns it red.
+        e.apply(&notif("a", "permission_prompt"));
+        assert_eq!(e.rollup(), Rollup::Red);
+        // And a later idle_prompt doesn't clear the real red either.
+        e.apply(&notif("a", "idle_prompt"));
+        assert_eq!(e.rollup(), Rollup::Red, "idle must not clear a pending red");
     }
 
     #[test]

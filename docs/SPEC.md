@@ -21,12 +21,18 @@ they can hand over a new task — without watching the terminal.
 
 | State | Color | Meaning | Source event |
 |---|---|---|---|
-| Needs you | 🔴 Red | Claude can't proceed without you (permission, choice, answer) | `Notification` (permission_prompt / elicitation_dialog / idle_prompt) |
+| Needs you | 🔴 Red | Claude can't proceed without you (permission, choice, answer) | `Notification` (permission_prompt / elicitation_dialog) |
 | Working | 🟠 Orange | Actively running — don't interrupt | `UserPromptSubmit`, `PostToolUse` heartbeat |
 | Ready | 🟢 Green | Turn finished — okay to give new instructions | `Stop`, `SubagentStop`, `SessionStart` |
 | None / stale | ⚪ Grey | No live session, or session went silent | `SessionEnd`, stale timeout |
 
 Rollup priority: Red > Orange > Green > Grey.
+
+> **Note:** `Notification` with `notification_type = idle_prompt` is **ignored**
+> (no state change). It fires when a session has merely been sitting idle, which
+> does not mean Claude is blocked on you — so an idle session stays Ready (green)
+> and only goes grey via the stale timeout. Only `permission_prompt` and
+> `elicitation_dialog` mean "Needs you".
 
 ## 4. Detection architecture
 

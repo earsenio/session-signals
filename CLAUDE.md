@@ -30,7 +30,7 @@ phase has a `/goal` prompt in `prompts/`.
 
 | State | Color | Meaning (user POV) | Set by |
 |---|---|---|---|
-| Needs you | 🔴 Red | Blocked on you — permission, choice, or answer | `Notification` (type ∈ permission_prompt, elicitation_dialog, idle_prompt) |
+| Needs you | 🔴 Red | Blocked on you — permission, choice, or answer | `Notification` (type ∈ permission_prompt, elicitation_dialog) |
 | Working | 🟠 Orange | Actively running — don't interrupt | `UserPromptSubmit`; `PostToolUse` heartbeat |
 | Ready | 🟢 Green | Finished its turn — okay to give new instructions | `Stop`, `SubagentStop`, `SessionStart` |
 | None / stale | ⚪ Grey | No live session / session went silent | `SessionEnd`, or stale timeout |
@@ -60,8 +60,8 @@ UserPromptSubmit        → state = WORKING,                lastSeen = now
 PostToolUse             → lastSeen = now (heartbeat; keep current WORKING state)
 Notification:
   permission_prompt   |
-  elicitation_dialog  | → state = NEEDS_YOU,              lastSeen = now
-  idle_prompt           |
+  elicitation_dialog    → state = NEEDS_YOU,              lastSeen = now
+  idle_prompt           → ignore (idle ≠ blocked; stays Ready until stale)
   auth_success / other  → ignore (no state change)
 Stop | SubagentStop     → state = READY,                  lastSeen = now
 SessionEnd              → remove session
@@ -78,9 +78,11 @@ SessionEnd              → remove session
 > ✅ **Verified (Claude Code 2.1.195):** All seven event names are valid.
 > `type: "http"` hooks are natively supported (Claude POSTs the stdin JSON to
 > the URL) — **no command-hook fallback needed**. The `Notification` payload
-> carries a `notification_type` field; relevant values are `permission_prompt`,
-> `idle_prompt`, `elicitation_dialog` (→ NEEDS_YOU) and `auth_success` /
-> `elicitation_complete` (ignored). Every event includes `session_id`, `cwd`,
+> carries a `notification_type` field; `permission_prompt` and
+> `elicitation_dialog` mean NEEDS_YOU. `idle_prompt` is **ignored** (it fires on
+> mere idleness, not a real block — an idle session stays Ready/green until the
+> stale sweep greys it), as are `auth_success` / `elicitation_complete`. Every
+> event includes `session_id`, `cwd`,
 > `transcript_path`, `hook_event_name`. HTTP hooks are non-blocking by nature
 > (a non-2xx/timeout is a non-blocking error), and Beacon's listener answers
 > instantly, so an explicit `async` flag is unnecessary for `http` hooks. The
