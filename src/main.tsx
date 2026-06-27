@@ -28,10 +28,10 @@ if (resolveLabel() === "widget") {
     );
   });
 } else {
-  void import("./App").then(({ default: App }) => {
+  void import("./settings/Settings").then(({ default: Settings }) => {
     root.render(
       <React.StrictMode>
-        <App />
+        <Settings />
       </React.StrictMode>,
     );
   });

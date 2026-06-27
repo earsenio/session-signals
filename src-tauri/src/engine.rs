@@ -61,6 +61,31 @@ pub struct HookEvent {
     pub notification_type: Option<String>,
 }
 
+/// A state change for one session, reported by `apply` so the notification
+/// engine can react. `from` is `None` when the session is brand new.
+#[derive(Serialize, Clone, Debug)]
+pub struct Transition {
+    pub session_id: String,
+    pub label: String,
+    pub from: Option<State>,
+    pub to: State,
+}
+
+/// Result of applying one hook event.
+pub struct ApplyOutcome {
+    /// True if the rollup / session list may have changed (worth a UI refresh).
+    pub changed: bool,
+    /// Present only when a session actually moved to a new state.
+    pub transition: Option<Transition>,
+}
+
+/// Result of a stale sweep.
+pub struct SweepOutcome {
+    pub changed: bool,
+    /// Sessions that newly went stale this sweep: `(session_id, label)`.
+    pub went_stale: Vec<(String, String)>,
+}
+
 /// A flattened, serializable view of one session for the webview / tray menu.
 #[derive(Serialize, Clone, Debug)]
 pub struct SessionView {
@@ -88,17 +113,20 @@ impl Engine {
         }
     }
 
-    /// Apply a hook event. Returns true if it may have changed the rollup or
-    /// session list (i.e. a refresh is worthwhile).
-    pub fn apply(&mut self, ev: &HookEvent) -> bool {
+    /// Apply a hook event. Reports whether a UI refresh is worthwhile and, if a
+    /// session actually changed state, the transition (for notifications).
+    pub fn apply(&mut self, ev: &HookEvent) -> ApplyOutcome {
         // An empty session_id is unusable as a key; ignore but don't crash.
         if ev.session_id.is_empty() && ev.hook_event_name != "SessionEnd" {
-            return false;
+            return ApplyOutcome {
+                changed: false,
+                transition: None,
+            };
         }
 
         match ev.hook_event_name.as_str() {
-            "SessionStart" => self.set_state(ev, State::Ready),
-            "UserPromptSubmit" => self.set_state(ev, State::Working),
+            "SessionStart" => self.transition_to(ev, State::Ready),
+            "UserPromptSubmit" => self.transition_to(ev, State::Working),
             "PostToolUse" => {
                 // Heartbeat: keep current state, just refresh last_seen. If we
                 // somehow never saw this session start, a tool running means
@@ -109,33 +137,49 @@ impl Engine {
                     if !ev.cwd.is_empty() {
                         s.cwd = ev.cwd.clone();
                     }
-                    true
+                    ApplyOutcome {
+                        changed: true,
+                        transition: None,
+                    }
                 } else {
-                    self.set_state(ev, State::Working)
+                    self.transition_to(ev, State::Working)
                 }
             }
             "Notification" => match ev.notification_type.as_deref() {
                 Some("permission_prompt")
                 | Some("elicitation_dialog")
-                | Some("idle_prompt") => self.set_state(ev, State::NeedsYou),
+                | Some("idle_prompt") => self.transition_to(ev, State::NeedsYou),
                 // auth_success, elicitation_complete, etc. → no state change.
-                _ => false,
+                _ => ApplyOutcome {
+                    changed: false,
+                    transition: None,
+                },
             },
-            "Stop" | "SubagentStop" => self.set_state(ev, State::Ready),
-            "SessionEnd" => self.sessions.remove(&ev.session_id).is_some(),
+            "Stop" | "SubagentStop" => self.transition_to(ev, State::Ready),
+            "SessionEnd" => ApplyOutcome {
+                changed: self.sessions.remove(&ev.session_id).is_some(),
+                transition: None,
+            },
             // Unknown / unhandled event: ignore.
-            _ => false,
+            _ => ApplyOutcome {
+                changed: false,
+                transition: None,
+            },
         }
     }
 
-    /// Upsert the session and move it to `state`, refreshing timers.
-    fn set_state(&mut self, ev: &HookEvent, state: State) -> bool {
+    /// Upsert the session and move it to `state`, refreshing timers. Returns a
+    /// transition only when the state actually changed (or the session is new),
+    /// so callers/notifications never fire on a same-state repeat.
+    fn transition_to(&mut self, ev: &HookEvent, state: State) -> ApplyOutcome {
         let now = Instant::now();
-        let entry = self.sessions.entry(ev.session_id.clone());
-        match entry {
+        // `from`: Some(prev) on a real change, None on a same-state repeat.
+        let (from, cwd) = match self.sessions.entry(ev.session_id.clone()) {
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let s = o.get_mut();
-                if s.state != state {
+                let prev = s.state;
+                let changed_state = prev != state;
+                if changed_state {
                     s.state = state;
                     s.state_since = now;
                 }
@@ -144,25 +188,46 @@ impl Engine {
                 if !ev.cwd.is_empty() {
                     s.cwd = ev.cwd.clone();
                 }
+                (if changed_state { Some(Some(prev)) } else { None }, s.cwd.clone())
             }
             std::collections::hash_map::Entry::Vacant(v) => {
+                let cwd = ev.cwd.clone();
                 v.insert(Session {
-                    cwd: ev.cwd.clone(),
+                    cwd: cwd.clone(),
                     state,
                     last_seen: now,
                     state_since: now,
                     stale: false,
                 });
+                (Some(None), cwd)
             }
+        };
+
+        let transition = from.map(|prev| Transition {
+            session_id: ev.session_id.clone(),
+            label: label_for(&cwd),
+            from: prev,
+            to: state,
+        });
+        ApplyOutcome {
+            changed: true,
+            transition,
         }
-        true
+    }
+
+    /// Update the stale timeout at runtime (settings change). Existing sessions
+    /// are re-evaluated on the next sweep.
+    pub fn set_stale_timeout(&mut self, timeout: Duration) {
+        self.stale_timeout = timeout;
     }
 
     /// Mark sessions stale past the timeout and drop them past the grace
-    /// window. Returns true if anything changed.
-    pub fn sweep(&mut self) -> bool {
+    /// window. Reports whether anything changed and which sessions newly went
+    /// stale (so the caller can optionally notify on idle).
+    pub fn sweep(&mut self) -> SweepOutcome {
         let now = Instant::now();
         let mut changed = false;
+        let mut went_stale = Vec::new();
 
         // Drop sessions that have been silent past timeout + grace.
         let before = self.sessions.len();
@@ -174,15 +239,21 @@ impl Engine {
         }
 
         // Mark the remainder stale/fresh based on the timeout.
-        for s in self.sessions.values_mut() {
+        for (id, s) in self.sessions.iter_mut() {
             let idle = now.duration_since(s.last_seen);
             let should_be_stale = idle >= self.stale_timeout;
             if should_be_stale != s.stale {
+                if should_be_stale {
+                    went_stale.push((id.clone(), label_for(&s.cwd)));
+                }
                 s.stale = should_be_stale;
                 changed = true;
             }
         }
-        changed
+        SweepOutcome {
+            changed,
+            went_stale,
+        }
     }
 
     /// Compute the tray rollup. Stale sessions are excluded; if none remain
@@ -320,6 +391,26 @@ mod tests {
     }
 
     #[test]
+    fn transition_reported_once_then_suppressed() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        // New session entering Working: transition from None.
+        let out = e.apply(&ev("UserPromptSubmit", "a"));
+        let t = out.transition.expect("first transition");
+        assert_eq!(t.from, None);
+        assert_eq!(t.to, State::Working);
+
+        // First permission prompt: Working → NeedsYou (one transition).
+        let out = e.apply(&notif("a", "permission_prompt"));
+        let t = out.transition.expect("transition into needs-you");
+        assert_eq!(t.from, Some(State::Working));
+        assert_eq!(t.to, State::NeedsYou);
+
+        // A second permission prompt while already NeedsYou: NO transition.
+        let out = e.apply(&notif("a", "permission_prompt"));
+        assert!(out.transition.is_none(), "repeat must not re-notify");
+    }
+
+    #[test]
     fn heartbeat_keeps_state() {
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
         e.apply(&ev("UserPromptSubmit", "a"));
@@ -333,8 +424,9 @@ mod tests {
         let mut e = Engine::new(Duration::from_millis(0), Duration::from_secs(3600));
         e.apply(&ev("SessionStart", "a"));
         assert_eq!(e.rollup(), Rollup::Green);
-        let changed = e.sweep();
-        assert!(changed);
+        let out = e.sweep();
+        assert!(out.changed);
+        assert_eq!(out.went_stale.len(), 1);
         // Stale → excluded from rollup → Grey, but still present.
         assert_eq!(e.rollup(), Rollup::Grey);
         assert_eq!(e.snapshot().len(), 1);

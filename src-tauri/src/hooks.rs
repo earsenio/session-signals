@@ -130,6 +130,39 @@ fn write_settings(path: &PathBuf, settings: &Map<String, Value>) -> Result<(), S
     std::fs::write(path, body + "\n").map_err(|e| format!("could not write settings.json: {e}"))
 }
 
+/// Are any of Beacon's hooks currently present in settings.json? Port-agnostic
+/// (our hooks are identified structurally), so this stays true across a port
+/// change until an explicit uninstall.
+pub fn is_installed() -> bool {
+    let path = match settings_path() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let settings = match load_settings(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    settings
+        .get("hooks")
+        .and_then(Value::as_object)
+        .map(|hooks| {
+            hooks.values().any(|groups| {
+                groups
+                    .as_array()
+                    .map(|gs| {
+                        gs.iter().any(|g| {
+                            g.get("hooks")
+                                .and_then(Value::as_array)
+                                .map(|hs| hs.iter().any(is_our_hook))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Merge Beacon's hooks into settings.json. Idempotent: any prior Beacon hooks
 /// are removed first, then our fresh block is added. Other hooks untouched.
 pub fn install(port: u16) -> Result<PathBuf, String> {

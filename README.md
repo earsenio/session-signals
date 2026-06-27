@@ -6,10 +6,11 @@ shows a rollup status that changes color as your sessions move between
 **hooks** that POST to a local listener — no terminal scraping, fully local, no
 network egress.
 
-> **Status: Phase 2 (Floating widget) complete.** Tray rollup driven by a real
-> detection chain, plus a frameless always-on-top widget showing one row per
-> live session. Notifications, settings UI, and themes come in later phases. See
-> `docs/SPEC.md` and `CLAUDE.md`.
+> **Status: Phase 3 (Notifications + settings) complete.** Tray rollup driven by
+> a real detection chain, a frameless always-on-top widget, configurable
+> per-state OS notifications fired on transitions, and a full settings window
+> (port, stale timeout, launch-on-login, hook status). Themes/packaging come in
+> Phase 4. See `docs/SPEC.md` and `CLAUDE.md`.
 
 ## Stack
 
@@ -41,6 +42,18 @@ Claude Code hooks ──POST /hook──▶ listener.rs ──▶ engine.rs ─�
   time-in-state), with compact (dot-strip) and expanded modes plus an opacity
   control. Position and view prefs persist via `tauri-plugin-store`; on restore
   the position is clamped to a currently-connected monitor.
+- **config.rs** — user configuration (notification prefs, port, stale timeout,
+  launch-on-login), persisted as one object in the store with `#[serde(default)]`
+  fields for forward-compatible migration.
+- **notify.rs** — fires OS notifications on state *transitions only* (the engine
+  reports a transition only when `from != to`, so a prompt that merely sits in
+  Needs-you never repeats), with a short debounce to collapse storms.
+
+The settings window (`src/settings/`) edits config live: per-state notify/sound
+toggles, listener port (rebinds the live listener and reinstalls hooks; a busy
+port surfaces a clear error), stale timeout, launch-on-login, and a hook status
+panel. Changing the port tears down the old `tiny_http` server (`unblock`) and
+swaps in a new one without restarting Beacon.
 
 ## Develop
 

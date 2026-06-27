@@ -32,7 +32,7 @@ fn tooltip_for(rollup: Rollup) -> &'static str {
 }
 
 /// Build the tray icon and menu. Starts grey (no sessions yet).
-pub fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
+pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let widget = MenuItem::with_id(app, "widget", "Show / hide widget", true, None::<&str>)?;
     let install = MenuItem::with_id(app, "install", "Install Claude Code hooks", true, None::<&str>)?;
     let uninstall =
@@ -55,7 +55,7 @@ pub fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
         .tooltip(tooltip_for(Rollup::Grey))
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(move |app, event| handle_menu(app, event.id().as_ref(), port))
+        .on_menu_event(move |app, event| handle_menu(app, event.id().as_ref()))
         .build(app)?;
 
     Ok(())
@@ -69,7 +69,9 @@ pub fn set_rollup(app: &AppHandle, rollup: Rollup) {
     }
 }
 
-fn handle_menu(app: &AppHandle, id: &str, port: u16) {
+fn handle_menu(app: &AppHandle, id: &str) {
+    // Use the live, configured port (it can change in settings).
+    let port = crate::current_port(app);
     match id {
         "widget" => windows::toggle(app),
         "install" => {
