@@ -75,6 +75,17 @@ SessionEnd              → remove session
 > `command` hook that forwards stdin to the listener (e.g. a tiny bundled
 > `curl`/forwarder). Do not assume the schema — read it.
 
+> ✅ **Verified (Claude Code 2.1.195):** All seven event names are valid.
+> `type: "http"` hooks are natively supported (Claude POSTs the stdin JSON to
+> the URL) — **no command-hook fallback needed**. The `Notification` payload
+> carries a `notification_type` field; relevant values are `permission_prompt`,
+> `idle_prompt`, `elicitation_dialog` (→ NEEDS_YOU) and `auth_success` /
+> `elicitation_complete` (ignored). Every event includes `session_id`, `cwd`,
+> `transcript_path`, `hook_event_name`. HTTP hooks are non-blocking by nature
+> (a non-2xx/timeout is a non-blocking error), and Beacon's listener answers
+> instantly, so an explicit `async` flag is unnecessary for `http` hooks. The
+> installed block uses an empty matcher (`""`) per event. See `hooks.rs`.
+
 ## Session presentation
 
 - **Label:** `basename(cwd)` + git branch if resolvable. Resolve branch by
