@@ -18,6 +18,13 @@ export interface SessionsPayload {
   sessions: SessionView[];
 }
 
+/// Mirrors the Rust `WidgetPrefs` (persisted view preferences).
+export interface WidgetPrefs {
+  compact: boolean;
+  opacity: number;
+  visible: boolean;
+}
+
 export const STATE_LABEL: Record<SessionState, string> = {
   needs_you: "Needs you",
   working: "Working",

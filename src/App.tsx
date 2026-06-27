@@ -49,7 +49,7 @@ export default function App() {
 
   // Live updates from the engine.
   useEffect(() => {
-    const sessionsUnlisten = listen<SessionsPayload>("beacon://sessions", (e) =>
+    const sessionsUnlisten = listen<SessionsPayload>("sessions-updated", (e) =>
       setPayload(e.payload),
     );
     const toastUnlisten = listen<string>("beacon://toast", (e) => setToast(e.payload));

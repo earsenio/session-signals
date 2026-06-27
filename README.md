@@ -6,9 +6,10 @@ shows a rollup status that changes color as your sessions move between
 **hooks** that POST to a local listener — no terminal scraping, fully local, no
 network egress.
 
-> **Status: Phase 1 (Foundation) complete.** Tray rollup driven by a real
-> detection chain. Floating widget, notifications, settings UI, and themes come
-> in later phases. See `docs/SPEC.md` and `CLAUDE.md`.
+> **Status: Phase 2 (Floating widget) complete.** Tray rollup driven by a real
+> detection chain, plus a frameless always-on-top widget showing one row per
+> live session. Notifications, settings UI, and themes come in later phases. See
+> `docs/SPEC.md` and `CLAUDE.md`.
 
 ## Stack
 
@@ -21,7 +22,9 @@ listener, state engine); React is a thin renderer.
 Claude Code hooks ──POST /hook──▶ listener.rs ──▶ engine.rs ──▶ tray.rs
    (HTTP, per event)              127.0.0.1:4317   (state map)    (icon color)
                                                         │
-                                                        └──emit──▶ React webview
+                                                        └─emit "sessions-updated"─▶ React
+                                                                                    ├─ widget
+                                                                                    └─ settings
 ```
 
 - **listener.rs** — tiny_http server bound to `127.0.0.1:4317`. `POST /hook`
@@ -29,19 +32,27 @@ Claude Code hooks ──POST /hook──▶ listener.rs ──▶ engine.rs ─�
 - **engine.rs** — session map keyed by `session_id`, applies the derivation
   rules in `CLAUDE.md`, computes the rollup (Red > Orange > Green > Grey), and
   sweeps stale sessions.
-- **tray.rs** — colored tray icon + menu (install/uninstall hooks, open, quit).
+- **tray.rs** — colored tray icon + menu (show/hide widget, install/uninstall
+  hooks, open, quit).
 - **hooks.rs** — non-destructively merges Beacon's HTTP hooks into
   `~/.claude/settings.json`; removes only its own entries on uninstall.
+- **windows.rs** — the floating widget: a frameless, transparent, always-on-top,
+  draggable window. One row per live session (dot • label • state •
+  time-in-state), with compact (dot-strip) and expanded modes plus an opacity
+  control. Position and view prefs persist via `tauri-plugin-store`; on restore
+  the position is clamped to a currently-connected monitor.
 
 ## Develop
 
 ```bash
 npm install
-npm run tauri dev      # run the app (tray-only; no main window)
+npm run tauri dev      # run the app (tray + floating widget; no dock icon)
 ```
 
 Then open the tray menu → **Install Claude Code hooks**, start a Claude Code
-session, and watch the icon change color. A copy-paste fallback for the hook
+session, and watch the tray icon and the floating widget change color. Drag the
+widget anywhere (it remembers where), toggle compact/expanded, adjust opacity,
+or hide it (tray → **Show / hide widget**). A copy-paste fallback for the hook
 config lives in the settings window (tray → **Open Beacon…**).
 
 ## Test

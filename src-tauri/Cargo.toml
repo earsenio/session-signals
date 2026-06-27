@@ -19,10 +19,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # tray-icon: tray support. image-png: decode our colored PNG tray icons at runtime.
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# macos-private-api: required for the transparent floating widget window.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
 # Single-instance guard so only one Beacon owns the listener port.
 tauri-plugin-single-instance = "2"
+# Persistent JSON store (app config dir) for widget position + view prefs.
+tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Tiny synchronous HTTP server for the localhost hook listener. Runs on its own

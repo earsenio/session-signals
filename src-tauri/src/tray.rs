@@ -3,6 +3,7 @@
 
 use crate::engine::Rollup;
 use crate::hooks;
+use crate::windows;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconId};
@@ -32,6 +33,7 @@ fn tooltip_for(rollup: Rollup) -> &'static str {
 
 /// Build the tray icon and menu. Starts grey (no sessions yet).
 pub fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
+    let widget = MenuItem::with_id(app, "widget", "Show / hide widget", true, None::<&str>)?;
     let install = MenuItem::with_id(app, "install", "Install Claude Code hooks", true, None::<&str>)?;
     let uninstall =
         MenuItem::with_id(app, "uninstall", "Uninstall hooks", true, None::<&str>)?;
@@ -39,8 +41,14 @@ pub fn build(app: &AppHandle, port: u16) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit Beacon", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
 
-    let menu = Menu::with_items(app, &[&install, &uninstall, &sep1, &settings, &sep2, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &widget, &sep1, &install, &uninstall, &sep2, &settings, &sep3, &quit,
+        ],
+    )?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon_for(Rollup::Grey))
@@ -63,6 +71,7 @@ pub fn set_rollup(app: &AppHandle, rollup: Rollup) {
 
 fn handle_menu(app: &AppHandle, id: &str, port: u16) {
     match id {
+        "widget" => windows::toggle(app),
         "install" => {
             let msg = match hooks::install(port) {
                 Ok(path) => format!("Hooks installed in {}", path.display()),

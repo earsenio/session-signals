@@ -9,8 +9,10 @@ pub mod engine;
 pub mod hooks;
 mod listener;
 mod tray;
+mod windows;
 
 use engine::{Engine, Rollup, SessionView};
+use windows::WidgetPrefs;
 use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -47,7 +49,7 @@ fn refresh(app: &AppHandle) {
         }
     };
     tray::set_rollup(app, payload.rollup);
-    let _ = app.emit("beacon://sessions", payload);
+    let _ = app.emit("sessions-updated", payload);
 }
 
 #[tauri::command]
@@ -79,6 +81,38 @@ fn endpoint(state: State<AppState>) -> String {
     hooks::endpoint(state.port)
 }
 
+// --- Widget commands (called from the widget webview) ---------------------
+
+#[tauri::command]
+fn widget_prefs(app: AppHandle) -> WidgetPrefs {
+    windows::load_prefs(&app)
+}
+
+#[tauri::command]
+fn widget_set_compact(app: AppHandle, compact: bool) {
+    windows::set_compact(&app, compact);
+}
+
+#[tauri::command]
+fn widget_set_opacity(app: AppHandle, opacity: f64) {
+    windows::set_opacity(&app, opacity);
+}
+
+#[tauri::command]
+fn widget_show(app: AppHandle) {
+    windows::show(&app);
+}
+
+#[tauri::command]
+fn widget_hide(app: AppHandle) {
+    windows::hide(&app);
+}
+
+#[tauri::command]
+fn widget_toggle(app: AppHandle) {
+    windows::toggle(&app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -92,6 +126,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState {
             engine: Mutex::new(Engine::new(
                 Duration::from_secs(STALE_TIMEOUT_MIN * 60),
@@ -104,7 +139,13 @@ pub fn run() {
             install_hooks,
             uninstall_hooks,
             hook_block,
-            endpoint
+            endpoint,
+            widget_prefs,
+            widget_set_compact,
+            widget_set_opacity,
+            widget_show,
+            widget_hide,
+            widget_toggle
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -115,6 +156,9 @@ pub fn run() {
 
             // Build the tray (starts grey).
             tray::build(&handle, PORT)?;
+
+            // Create the floating widget (shown only if it was visible last run).
+            windows::init(&handle)?;
 
             // Closing the settings window hides it rather than quitting Beacon.
             if let Some(window) = app.get_webview_window("settings") {
