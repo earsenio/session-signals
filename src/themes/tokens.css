@@ -72,3 +72,28 @@
     opacity: 0;
   }
 }
+
+/* Subagent activity (Surface 9): the sub-line dot pulses, the glyph halo breathes. */
+@keyframes beaconBusyDot {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.55);
+    opacity: 0.4;
+  }
+}
+
+@keyframes beaconBusyHalo {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.36;
+    transform: scale(1.1);
+  }
+}

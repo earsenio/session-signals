@@ -45,6 +45,13 @@ struct Session {
     /// True once it has gone silent past the stale timeout (display grey,
     /// excluded from rollup) but before the grace drop.
     stale: bool,
+    /// Live subagents fanned out from this session: `SubagentStart` minus
+    /// `SubagentStop`, clamped at ≥ 0. Drives the row's "N agents running"
+    /// sub-line independently of `state`.
+    subagent_count: u32,
+    /// When `subagent_count` last rose from 0 — the anchor for the sub-line's
+    /// ticking elapsed timer. `None` whenever the count is 0.
+    sub_since: Option<Instant>,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -95,6 +102,10 @@ pub struct SessionView {
     pub stale: bool,
     /// Seconds the session has been in its current state.
     pub seconds_in_state: u64,
+    /// Live subagents running under this session (`SubagentStart` − `SubagentStop`).
+    pub subagent_count: u32,
+    /// Seconds since the subagent count rose from 0 (0 when none are running).
+    pub subagent_seconds: u64,
 }
 
 pub struct Engine {
@@ -130,15 +141,34 @@ impl Engine {
         }
 
         match ev.hook_event_name.as_str() {
-            "SessionStart" => self.transition_to(ev, State::Ready),
+            // A fresh (or resumed) session: clear any leftover subagent count so a
+            // restart never inherits a stale "N agents running" sub-line.
+            "SessionStart" => {
+                let out = self.transition_to(ev, State::Ready);
+                self.reset_subagents(&ev.session_id);
+                out
+            }
             // Any work-start signal means the session is actively running. We
             // bracket "Working" between these and the terminal events below, so
             // activity that doesn't begin with a typed prompt — slash-command
-            // expansion, a tool call, a spawned subagent, context compaction —
-            // still shows up. (`/compact` fires PreCompact, never
-            // UserPromptSubmit, which is why it used to stay green.)
-            "UserPromptSubmit" | "UserPromptExpansion" | "PreToolUse" | "SubagentStart"
-            | "PreCompact" => self.transition_to(ev, State::Working),
+            // expansion, a tool call, context compaction — still shows up.
+            // (`/compact` fires PreCompact, never UserPromptSubmit, which is why
+            // it used to stay green.)
+            "UserPromptSubmit" | "UserPromptExpansion" | "PreToolUse" | "PreCompact" => {
+                self.transition_to(ev, State::Working)
+            }
+            // A spawned subagent: the parent is working, and we bump the live
+            // subagent count. The first one anchors the sub-line's elapsed timer.
+            "SubagentStart" => {
+                let out = self.transition_to(ev, State::Working);
+                if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+                    if s.subagent_count == 0 {
+                        s.sub_since = Some(Instant::now());
+                    }
+                    s.subagent_count += 1;
+                }
+                out
+            }
             "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" => {
                 // Heartbeat: keep current state, just refresh last_seen. If we
                 // somehow never saw this session start, a tool running means
@@ -176,8 +206,18 @@ impl Engine {
             // standalone `/compact` to Ready; mid-turn it briefly shows Ready
             // until the next work event flips it back (self-healing).
             // `StopFailure` is a turn ended by an API error.
-            "Stop" | "StopFailure" | "SubagentStop" | "PostCompact" => {
-                self.transition_to(ev, State::Ready)
+            "Stop" | "StopFailure" | "PostCompact" => self.transition_to(ev, State::Ready),
+            // A subagent finished: decrement (clamped), and when the last one
+            // leaves, drop the elapsed anchor so the sub-line disappears.
+            "SubagentStop" => {
+                let out = self.transition_to(ev, State::Ready);
+                if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+                    s.subagent_count = s.subagent_count.saturating_sub(1);
+                    if s.subagent_count == 0 {
+                        s.sub_since = None;
+                    }
+                }
+                out
             }
             "SessionEnd" => ApplyOutcome {
                 changed: self.sessions.remove(&ev.session_id).is_some(),
@@ -221,6 +261,8 @@ impl Engine {
                     last_seen: now,
                     state_since: now,
                     stale: false,
+                    subagent_count: 0,
+                    sub_since: None,
                 });
                 (Some(None), cwd)
             }
@@ -235,6 +277,16 @@ impl Engine {
         ApplyOutcome {
             changed: true,
             transition,
+        }
+    }
+
+    /// Clear a session's live subagent count + elapsed anchor. Used on
+    /// `SessionStart` so a (re)started session never carries a stale sub-line.
+    /// A no-op if the session isn't tracked yet.
+    fn reset_subagents(&mut self, id: &str) {
+        if let Some(s) = self.sessions.get_mut(id) {
+            s.subagent_count = 0;
+            s.sub_since = None;
         }
     }
 
@@ -323,6 +375,11 @@ impl Engine {
                 state: s.state,
                 stale: s.stale,
                 seconds_in_state: now.duration_since(s.state_since).as_secs(),
+                subagent_count: s.subagent_count,
+                subagent_seconds: s
+                    .sub_since
+                    .map(|t| now.duration_since(t).as_secs())
+                    .unwrap_or(0),
             })
             .collect();
         // Stable, useful ordering: live before stale, then by label.
@@ -537,6 +594,81 @@ mod tests {
         e2.apply(&ev("SessionStart", "a"));
         e2.sweep();
         assert_eq!(e2.snapshot().len(), 0);
+    }
+
+    /// Live subagent count for a session id in the current snapshot.
+    fn sub_count(e: &Engine, sid: &str) -> u32 {
+        e.snapshot()
+            .into_iter()
+            .find(|v| v.session_id == sid)
+            .map(|v| v.subagent_count)
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn subagent_count_rises_and_falls() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        assert_eq!(sub_count(&e, "a"), 0);
+        e.apply(&ev("SubagentStart", "a"));
+        e.apply(&ev("SubagentStart", "a"));
+        assert_eq!(sub_count(&e, "a"), 2);
+        // Still actively working with subagents out.
+        assert_eq!(e.rollup(), Rollup::Orange);
+        e.apply(&ev("SubagentStop", "a"));
+        assert_eq!(sub_count(&e, "a"), 1);
+        e.apply(&ev("SubagentStop", "a"));
+        assert_eq!(sub_count(&e, "a"), 0);
+    }
+
+    #[test]
+    fn subagent_count_clamps_at_zero() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SubagentStart", "a"));
+        // Two stops for one start must not underflow.
+        e.apply(&ev("SubagentStop", "a"));
+        e.apply(&ev("SubagentStop", "a"));
+        assert_eq!(sub_count(&e, "a"), 0);
+        // And a fresh start still works afterwards.
+        e.apply(&ev("SubagentStart", "a"));
+        assert_eq!(sub_count(&e, "a"), 1);
+    }
+
+    #[test]
+    fn subagent_counts_are_per_session() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        // Interleaved starts/stops across two concurrent sessions.
+        e.apply(&ev("SubagentStart", "a"));
+        e.apply(&ev("SubagentStart", "b"));
+        e.apply(&ev("SubagentStart", "a"));
+        e.apply(&ev("SubagentStop", "b"));
+        assert_eq!(sub_count(&e, "a"), 2);
+        assert_eq!(sub_count(&e, "b"), 0);
+    }
+
+    #[test]
+    fn sub_since_anchors_only_while_busy() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SubagentStart", "a"));
+        // Busy → a real elapsed anchor (seconds is small but the field exists).
+        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        assert_eq!(v.subagent_count, 1);
+        // Idle → seconds reported as 0.
+        e.apply(&ev("SubagentStop", "a"));
+        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        assert_eq!(v.subagent_count, 0);
+        assert_eq!(v.subagent_seconds, 0);
+    }
+
+    #[test]
+    fn session_start_resets_subagents() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SubagentStart", "a"));
+        e.apply(&ev("SubagentStart", "a"));
+        assert_eq!(sub_count(&e, "a"), 2);
+        // A (re)start of the same id clears the count.
+        e.apply(&ev("SessionStart", "a"));
+        assert_eq!(sub_count(&e, "a"), 0);
     }
 
     #[test]

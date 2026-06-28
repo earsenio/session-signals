@@ -114,14 +114,80 @@ body {
 
 .wRow {
   display: flex;
-  align-items: center;
-  gap: var(--sp-3);
+  flex-direction: column;
+  gap: 9px;
   padding: var(--sp-3) var(--sp-4);
   min-height: 56px;
 }
 
 .wRow + .wRow {
   border-top: 1px solid var(--hairline-faint);
+}
+
+/* The row's primary line: glyph • label/state • chevron. */
+.wRowTop {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* Holds the glyph plus its halo, centered, so the halo sits behind the glyph. */
+.wGlyphWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.wGlyphFront {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Soft amber halo — always amber (#F5A742) regardless of the row's state. */
+.wBusyHalo {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #f5a742;
+  filter: blur(7px);
+  opacity: 0.32;
+  animation: beaconBusyHalo 2.4s ease-in-out infinite;
+}
+
+/* --- Subagent activity sub-line (indented under the title) --- */
+.wSubline {
+  margin-left: 33px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(245, 167, 66, 0.09);
+  border: 1px solid rgba(245, 167, 66, 0.2);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.wSubDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f5a742;
+  animation: beaconBusyDot 1.8s ease-in-out infinite;
+  flex: none;
+}
+
+.wSubLabel {
+  font: 500 11px var(--font-sans);
+  color: #e2c79a;
+}
+
+.wSubTimer {
+  margin-left: auto;
+  font: 500 10.5px var(--font-mono);
+  color: #9a8b6e;
+  font-variant-numeric: tabular-nums;
 }
 
 .wRowMain {
