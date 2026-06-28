@@ -186,9 +186,18 @@ pub fn set_compact(app: &AppHandle, compact: bool) {
         if compact {
             // Capture the size we're collapsing from (the window is still
             // expanded at this point) so expanding restores exactly that.
+            //
+            // Guard: only record a *genuinely expanded* height. A duplicate or
+            // late collapse call (e.g. a React StrictMode double-invoke, or a
+            // toggle that races the previous one) can arrive after the window
+            // has already shrunk to `COMPACT_H`; capturing that would poison the
+            // restore size and re-expand to a ~0-height list with no rows. Any
+            // height below the expanded minimum is not a real expanded size.
             let (w, h) = logical_inner(&window);
-            store_f64(app, KEY_EXPANDED_W, w);
-            store_f64(app, KEY_EXPANDED_H, h);
+            if h >= EXPANDED_MIN_H {
+                store_f64(app, KEY_EXPANDED_W, w);
+                store_f64(app, KEY_EXPANDED_H, h);
+            }
         }
         apply_size(app, &window, compact);
     }
@@ -209,8 +218,15 @@ fn apply_size(app: &AppHandle, window: &WebviewWindow, compact: bool) {
         let _ = window.set_resizable(false);
     } else {
         let _ = window.set_min_size(Some(LogicalSize::new(EXPANDED_MIN_W, EXPANDED_MIN_H)));
-        let w = load_f64(app, KEY_EXPANDED_W).unwrap_or(DEFAULT_W);
-        let h = load_f64(app, KEY_EXPANDED_H).unwrap_or(DEFAULT_H);
+        // Restore the remembered expanded size, but reject an implausibly small
+        // saved value (e.g. a store poisoned by the pre-fix double-collapse bug)
+        // and heal to the comfortable default rather than the cramped minimum.
+        let w = load_f64(app, KEY_EXPANDED_W)
+            .filter(|v| *v >= EXPANDED_MIN_W)
+            .unwrap_or(DEFAULT_W);
+        let h = load_f64(app, KEY_EXPANDED_H)
+            .filter(|v| *v >= EXPANDED_MIN_H)
+            .unwrap_or(DEFAULT_H);
         let _ = window.set_size(LogicalSize::new(w, h));
         let _ = window.set_resizable(true);
     }
