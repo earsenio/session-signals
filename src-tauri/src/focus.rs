@@ -62,7 +62,10 @@ pub fn frontmost_pid() -> Option<i32> {
 
 #[cfg(target_os = "windows")]
 pub fn raise_pid(pid: i32) -> bool {
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    // `BOOL` lives in `windows::core` as of the windows crate 0.58+; the rest
+    // remain under `Win32::Foundation`.
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
     use windows::Win32::UI::WindowsAndMessaging::{
         AllowSetForegroundWindow, EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
         SetForegroundWindow, ShowWindow, ASFW_ANY, SW_RESTORE,
