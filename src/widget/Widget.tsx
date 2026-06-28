@@ -372,12 +372,16 @@ export default function Widget() {
   }, []);
 
   const toggleCompact = useCallback(() => {
-    setCompact((prev) => {
-      const next = !prev;
-      invoke("widget_set_compact", { compact: next }).catch(() => {});
-      return next;
-    });
-  }, []);
+    // Keep the side effect OUT of the setState updater: React StrictMode (and
+    // any future concurrent re-render) double-invokes updaters to surface
+    // impurity, which would fire `widget_set_compact` twice per click. The
+    // second collapse call would then capture the already-shrunk window height
+    // as the "expanded" size and restore to a ~0-height list. Compute `next`
+    // from current state and invoke exactly once.
+    const next = !compact;
+    setCompact(next);
+    invoke("widget_set_compact", { compact: next }).catch(() => {});
+  }, [compact]);
 
   const hide = useCallback(() => {
     invoke("widget_hide").catch(() => {});

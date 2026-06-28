@@ -17,7 +17,7 @@ mod tray;
 mod windows;
 
 use config::Config;
-use engine::{Engine, HookEvent, Rollup, SessionView, Transition};
+use engine::{CapturedTerminal, Engine, HookEvent, Rollup, SessionView, Transition};
 use notify::Notifier;
 use tray::TrayPalette;
 use serde::Serialize;
@@ -25,11 +25,84 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_store::StoreExt;
 use tiny_http::Server;
 use windows::WidgetPrefs;
 
 /// How often the background sweep checks for stale sessions.
 const SWEEP_INTERVAL_SECS: u64 = 15;
+
+/// Store file (shared with `windows.rs`) and the key under which captured
+/// terminal handles are persisted: `{ session_id: { pid, app, tty } }`. They are
+/// rehydrated at startup so click-to-focus survives a Beacon restart even though
+/// the capture hook only fires on `SessionStart`.
+const STORE_FILE: &str = "beacon.json";
+const KEY_CAPTURES: &str = "captures";
+
+/// Persist a freshly-captured terminal handle, keyed by session id. Best-effort:
+/// a store error just means this session won't survive a restart for focus.
+fn persist_capture(app: &AppHandle, ev: &HookEvent) {
+    let Ok(store) = app.store(STORE_FILE) else {
+        return;
+    };
+    let mut map = store
+        .get(KEY_CAPTURES)
+        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok())
+        .unwrap_or_default();
+    map.insert(
+        ev.session_id.clone(),
+        CapturedTerminal {
+            pid: ev.terminal_pid,
+            app: ev.terminal_app.clone(),
+            tty: ev.terminal_tty.clone(),
+        },
+    );
+    if let Ok(v) = serde_json::to_value(&map) {
+        store.set(KEY_CAPTURES, v);
+        let _ = store.save();
+    }
+}
+
+/// Drop a session's persisted handle (on `SessionEnd`) so the store doesn't
+/// accumulate handles for terminals that no longer exist.
+fn forget_capture(app: &AppHandle, session_id: &str) {
+    let Ok(store) = app.store(STORE_FILE) else {
+        return;
+    };
+    let Some(mut map) = store
+        .get(KEY_CAPTURES)
+        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok())
+    else {
+        return;
+    };
+    if map.remove(session_id).is_some() {
+        if let Ok(v) = serde_json::to_value(&map) {
+            store.set(KEY_CAPTURES, v);
+            let _ = store.save();
+        }
+    }
+}
+
+/// Seed remembered terminal handles into the engine at startup. They attach to a
+/// session only when a real hook event recreates its row, so this can never
+/// resurrect a phantom session — it just restores click-to-focus for sessions
+/// that are still running when Beacon comes back up.
+fn seed_captures(app: &AppHandle) {
+    let Ok(store) = app.store(STORE_FILE) else {
+        return;
+    };
+    let Some(map) = store
+        .get(KEY_CAPTURES)
+        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok())
+    else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let mut eng = state.engine.lock().expect("engine mutex poisoned");
+    for (id, cap) in map {
+        eng.seed_capture(id, cap);
+    }
+}
 
 /// Shared application state, managed by Tauri.
 struct AppState {
@@ -92,6 +165,13 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
         let mut eng = state.engine.lock().expect("engine mutex poisoned");
         eng.apply(&ev)
     };
+    // Persist (or forget) the terminal handle so click-to-focus survives a
+    // Beacon restart — the capture hook itself only fires on `SessionStart`.
+    match ev.hook_event_name.as_str() {
+        "BeaconTerminal" if ev.terminal_pid.is_some() => persist_capture(app, &ev),
+        "SessionEnd" => forget_capture(app, &ev.session_id),
+        _ => {}
+    }
     if outcome.changed {
         refresh(app);
     }
@@ -528,6 +608,13 @@ pub fn run() {
                     let _ = window.set_focus();
                 }
             }
+
+            // Rehydrate terminal handles captured before the last shutdown, so
+            // click-to-focus works for still-running sessions the moment they
+            // next emit any hook — without waiting for a fresh `SessionStart`.
+            // Seeded before the listener binds, so it's in place for the first
+            // event that recreates a session row.
+            seed_captures(&handle);
 
             // Start the localhost hook listener on the configured port.
             let server = spawn_listener(&handle, cfg.port).map_err(
