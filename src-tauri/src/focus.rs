@@ -1,14 +1,109 @@
-//! Best-effort OS window focus, keyed by a process id.
+//! Best-effort OS window focus.
 //!
-//! Two operations, each with a per-platform implementation and a no-op fallback:
-//!
-//! - [`raise_pid`]   — bring the top-level window owned by `pid` to the front.
+//! - [`raise`]       — bring the window *and the exact tab* owning a session to
+//!   the front, given its `(pid, tty, app)` target.
+//! - [`raise_pid`]   — bring the top-level window owned by `pid` to the front
+//!   (app-level only); the fallback `raise` uses when tab selection isn't
+//!   possible.
 //! - [`frontmost_pid`] — the pid of whichever app currently owns the foreground.
 //!
-//! Both are *app/window level*, never tab level: focusing a terminal multiplexer
-//! (tmux) pane or an IDE-integrated terminal tab is not portable and is out of
-//! scope (see the Phase 5 brief). Everything degrades gracefully — an
-//! unresolvable pid yields `false` / `None`, never a panic.
+//! Tab precision: on macOS, scriptable terminals (Terminal.app, iTerm2) expose a
+//! per-tab `tty`, so if Beacon captured the session's tty we select that exact
+//! tab via AppleScript rather than merely raising the app — the difference
+//! between landing on the right session and landing on whatever tab happened to
+//! be active. Unknown terminals, a tmux pane, an IDE-integrated terminal, and
+//! all of Windows fall back to the app-level raise. Everything degrades
+//! gracefully — an unresolvable target yields `false`, never a panic.
+
+/// Everything Beacon captured about where a session lives, enough to focus it.
+/// `tty`/`app` are best-effort; `pid` (the terminal app) is the floor.
+pub struct FocusTarget {
+    pub pid: i32,
+    /// Controlling tty, e.g. "/dev/ttys003". Enables tab-precise focus.
+    pub tty: Option<String>,
+    /// Terminal app name (e.g. "Terminal", "iTerm2"), picks the focus strategy.
+    pub app: Option<String>,
+}
+
+/// Focus the exact tab/window owning a session. Tries tab-precise AppleScript
+/// for known terminals, then falls back to an app-level raise by pid.
+#[cfg(target_os = "macos")]
+pub fn raise(t: &FocusTarget) -> bool {
+    if let Some(tty) = t.tty.as_deref().filter(|s| !s.is_empty()) {
+        let app = t.app.as_deref().unwrap_or("");
+        // `comm` basenames: Terminal.app → "Terminal", iTerm2 → "iTerm2".
+        if app.eq_ignore_ascii_case("Terminal") {
+            if raise_terminal_app_tab(tty) {
+                return true;
+            }
+        } else if app.eq_ignore_ascii_case("iTerm2") || app.eq_ignore_ascii_case("iTerm") {
+            if raise_iterm_tab(tty) {
+                return true;
+            }
+        }
+    }
+    raise_pid(t.pid)
+}
+
+/// Run an AppleScript and report success — true only if osascript exited 0 *and*
+/// the script printed our sentinel (so "compiled but matched nothing" reads as a
+/// miss, letting the caller fall back rather than claim a phantom success).
+#[cfg(target_os = "macos")]
+fn osascript_ok(script: &str) -> bool {
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("BEACON_OK"))
+        .unwrap_or(false)
+}
+
+/// Terminal.app: find the tab whose `tty` matches, select it, raise its window.
+/// `tty` is a fixed `/dev/ttysNNN` string (no quoting hazard).
+#[cfg(target_os = "macos")]
+fn raise_terminal_app_tab(tty: &str) -> bool {
+    let script = format!(
+        r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if (tty of t) is "{tty}" then
+        set selected of t to true
+        set frontmost of w to true
+        activate
+        return "BEACON_OK"
+      end if
+    end repeat
+  end repeat
+end tell
+return "no""#
+    );
+    osascript_ok(&script)
+}
+
+/// iTerm2: a tab holds sessions, each with a `tty`. Select the matching session,
+/// its tab, and window, then activate.
+#[cfg(target_os = "macos")]
+fn raise_iterm_tab(tty: &str) -> bool {
+    let script = format!(
+        r#"tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (tty of s) is "{tty}" then
+          tell w to select
+          tell t to select
+          tell s to select
+          activate
+          return "BEACON_OK"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no""#
+    );
+    osascript_ok(&script)
+}
 
 /// Raise the top-level window owned by `pid`. Returns whether a window was found
 /// and a raise was attempted.
@@ -59,6 +154,13 @@ pub fn frontmost_pid() -> Option<i32> {
 }
 
 // --- Windows ---------------------------------------------------------------
+
+/// Windows Terminal tabs aren't addressable portably, so we raise the terminal
+/// app's window by pid (tty/app on the target are unused here).
+#[cfg(target_os = "windows")]
+pub fn raise(t: &FocusTarget) -> bool {
+    raise_pid(t.pid)
+}
 
 #[cfg(target_os = "windows")]
 pub fn raise_pid(pid: i32) -> bool {
@@ -138,6 +240,11 @@ pub fn frontmost_pid() -> Option<i32> {
 }
 
 // --- Fallback (other platforms) -------------------------------------------
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn raise(t: &FocusTarget) -> bool {
+    raise_pid(t.pid)
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn raise_pid(_pid: i32) -> bool {

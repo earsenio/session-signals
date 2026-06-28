@@ -59,6 +59,11 @@ struct Session {
     /// Human name of that terminal app (e.g. "iTerm2", "WindowsTerminal.exe"),
     /// for display/debugging. Best-effort.
     terminal_app: Option<String>,
+    /// Controlling tty of this session (e.g. "/dev/ttys003"), captured by walking
+    /// the parent chain. Lets `focus.rs` select the exact tab/window on macOS
+    /// terminals that expose a per-tab tty (Terminal.app, iTerm2), rather than
+    /// only raising the app. `None` on Windows / when unresolved.
+    terminal_tty: Option<String>,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -79,6 +84,9 @@ pub struct HookEvent {
     pub terminal_pid: Option<i32>,
     #[serde(default)]
     pub terminal_app: Option<String>,
+    /// Present only on `BeaconTerminal`: the session's controlling tty.
+    #[serde(default)]
+    pub terminal_tty: Option<String>,
 }
 
 /// A state change for one session, reported by `apply` so the notification
@@ -257,12 +265,16 @@ impl Engine {
                         sub_since: None,
                         terminal_pid: None,
                         terminal_app: None,
+                        terminal_tty: None,
                     });
                 if ev.terminal_pid.is_some() {
                     s.terminal_pid = ev.terminal_pid;
                 }
                 if ev.terminal_app.is_some() {
                     s.terminal_app = ev.terminal_app.clone();
+                }
+                if ev.terminal_tty.as_deref().is_some_and(|t| !t.is_empty()) {
+                    s.terminal_tty = ev.terminal_tty.clone();
                 }
                 s.last_seen = now;
                 if !ev.cwd.is_empty() {
@@ -323,6 +335,7 @@ impl Engine {
                     sub_since: None,
                     terminal_pid: None,
                     terminal_app: None,
+                    terminal_tty: None,
                 });
                 (Some(None), cwd, None)
             }
@@ -355,6 +368,15 @@ impl Engine {
     /// the click-to-focus command to know which window to raise.
     pub fn terminal_pid(&self, id: &str) -> Option<i32> {
         self.sessions.get(id).and_then(|s| s.terminal_pid)
+    }
+
+    /// The full focus target for a session: `(pid, tty, app)`. The tty + app let
+    /// `focus.rs` select the exact tab on macOS terminals; the pid is the
+    /// app-level fallback. `None` until Beacon captured at least a pid.
+    pub fn focus_target(&self, id: &str) -> Option<(i32, Option<String>, Option<String>)> {
+        self.sessions
+            .get(id)
+            .and_then(|s| s.terminal_pid.map(|p| (p, s.terminal_tty.clone(), s.terminal_app.clone())))
     }
 
     /// Update the stale timeout at runtime (settings change). Existing sessions
@@ -525,6 +547,7 @@ mod tests {
             notification_type: None,
             terminal_pid: None,
             terminal_app: None,
+            terminal_tty: None,
         }
     }
 
@@ -536,6 +559,7 @@ mod tests {
             notification_type: Some(ty.to_string()),
             terminal_pid: None,
             terminal_app: None,
+            terminal_tty: None,
         }
     }
 

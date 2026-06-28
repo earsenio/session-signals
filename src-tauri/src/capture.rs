@@ -38,9 +38,20 @@ payload=$(cat)
 sid=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 [ -z "$sid" ] && exit 0
 cwd=$(printf '%s' "$payload" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+# Walk the parent-process chain to the top-level terminal app (pid). Along the
+# way, capture the first *real* controlling tty — the hook process itself is
+# detached (tty "??"), but its ancestors (claude, the shell) carry the tab's
+# pty, e.g. "ttys003". That tty is the key that lets focus.rs select the exact
+# tab/window, not just raise the app.
 pid=$$
+tty=""
 while :; do
-  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  info=$(ps -o ppid=,tty= -p "$pid" 2>/dev/null)
+  ppid=$(printf '%s' "$info" | awk '{print $1}')
+  t=$(printf '%s' "$info" | awk '{print $2}')
+  if [ -z "$tty" ] && [ -n "$t" ] && [ "$t" != "?" ] && [ "$t" != "??" ]; then
+    tty="/dev/$t"
+  fi
   [ -z "$ppid" ] && break
   [ "$ppid" -le 1 ] && break
   pid=$ppid
@@ -49,7 +60,7 @@ app=$(ps -o comm= -p "$pid" 2>/dev/null | sed 's:.*/::')
 curl -s -m 2 -X POST "http://127.0.0.1:$PORT/hook" \
   -H "Content-Type: application/json" \
   -H "X-Beacon-Token: $TOKEN" \
-  -d "{\"hook_event_name\":\"BeaconTerminal\",\"session_id\":\"$sid\",\"cwd\":\"$cwd\",\"terminal_pid\":$pid,\"terminal_app\":\"$app\"}" \
+  -d "{\"hook_event_name\":\"BeaconTerminal\",\"session_id\":\"$sid\",\"cwd\":\"$cwd\",\"terminal_pid\":$pid,\"terminal_app\":\"$app\",\"terminal_tty\":\"$tty\"}" \
   >/dev/null 2>&1
 exit 0
 "#;

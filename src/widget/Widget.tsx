@@ -154,7 +154,7 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
       className={`wRow${session.can_focus ? " wRowFocusable" : ""}`}
       style={{ opacity: session.stale ? 0.5 : 1 }}
       onClick={onFocus}
-      title={session.can_focus ? "Click to focus this session’s terminal" : undefined}
+      title={session.can_focus ? "Click to jump to this session’s terminal tab" : undefined}
     >
       <div className="wRowTop">
         <span className="wGlyphWrap">
@@ -189,7 +189,26 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
             can’t focus
           </span>
         ) : (
-          session.can_focus && <span className="wChevron">›</span>
+          // "Open in terminal" affordance: a quiet launch glyph that brightens
+          // and nudges right on row hover, signalling the row is clickable.
+          session.can_focus && (
+            <span className="wOpenIcon" aria-hidden="true">
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M15 3h6v6" />
+                <path d="M10 14 21 3" />
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+              </svg>
+            </span>
+          )
         )}
       </div>
       {/* Quiet sub-line: pulsing dot + count + ticking elapsed. Rendered only

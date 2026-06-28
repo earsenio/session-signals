@@ -237,10 +237,21 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.wChevron {
-  font-size: 17px;
+/* "Open in terminal" launch glyph — quiet at rest, lights up on row hover so the
+   row reads as clickable without shouting. */
+.wOpenIcon {
+  display: inline-flex;
+  align-items: center;
   color: var(--text-3);
+  opacity: 0.55;
   flex: none;
+  transition: opacity 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+
+.wRowFocusable:hover .wOpenIcon {
+  opacity: 1;
+  color: var(--text);
+  transform: translateX(2px);
 }
 
 /* Click-to-focus: only rows whose terminal window resolved are interactive. */

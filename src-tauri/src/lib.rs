@@ -314,13 +314,17 @@ fn endpoint(app: AppHandle) -> String {
 /// this to flash a "can't focus" hint on a false. Never errors/panics.
 #[tauri::command]
 fn focus_session(app: AppHandle, session_id: String) -> bool {
-    let pid = {
+    let target = {
         let state = app.state::<AppState>();
         let eng = state.engine.lock().expect("engine mutex poisoned");
-        eng.terminal_pid(&session_id)
+        eng.focus_target(&session_id)
     };
-    match pid {
-        Some(p) => focus::raise_pid(p),
+    match target {
+        Some((pid, tty, app_name)) => focus::raise(&focus::FocusTarget {
+            pid,
+            tty,
+            app: app_name,
+        }),
         None => false,
     }
 }
