@@ -35,3 +35,6 @@ serde_json = "1"
 # Tiny synchronous HTTP server for the localhost hook listener. Runs on its own
 # thread; no async runtime needed. Bound to 127.0.0.1 only.
 tiny_http = "0.12"
+# Encode the theme-colored status dots to PNG for notification icons. (The tray
+# icon uses raw RGBA via tauri::image::Image and needs no encoder.)
+png = "0.17"

@@ -14,6 +14,8 @@ export interface Config {
   stale_timeout_min: number;
   launch_on_login: boolean;
   notify_idle: boolean;
+  /// Active theme id (see src/themes). Unknown ids fall back to the default.
+  theme: string;
   needs_you: StateNotify;
   working: StateNotify;
   ready: StateNotify;
@@ -28,6 +30,7 @@ export const DEFAULT_CONFIG: Config = {
   stale_timeout_min: 10,
   launch_on_login: false,
   notify_idle: false,
+  theme: "classic",
   needs_you: { enabled: true, sound: false, sound_name: "Ping" },
   working: { enabled: false, sound: false, sound_name: "Pop" },
   ready: { enabled: false, sound: false, sound_name: "Glass" },

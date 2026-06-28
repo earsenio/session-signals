@@ -1,32 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import {
-  ROLLUP_COLOR,
-  ROLLUP_LABEL,
-  STATE_COLOR,
-  type Rollup,
-  type SessionsPayload,
-} from "../state/types";
 import { DEFAULT_CONFIG, SOUNDS, type Config, type StateNotify } from "../state/config";
+import { useTheme } from "../themes/useTheme";
+import { THEME_LIST, type ThemePalette } from "../themes";
+import { shapeForState, StateGlyph } from "../components/StateGlyph";
 import "./Settings.css";
 
 type StateKey = "needs_you" | "working" | "ready";
 
 const STATE_META: Record<StateKey, { title: string; hint: string }> = {
-  needs_you: { title: "Needs you", hint: "Blocked on you — permission, choice, or answer" },
-  working: { title: "Working", hint: "Actively running — don't interrupt" },
-  ready: { title: "Ready", hint: "Finished its turn — okay to give new instructions" },
+  needs_you: { title: "Needs you", hint: "Alert when a session is blocked on you" },
+  working: { title: "Working", hint: "Usually off — you don’t need pinging mid-run" },
+  ready: { title: "Ready", hint: "Alert when a turn finishes and it’s your move" },
 };
 
 export default function Settings() {
+  const theme = useTheme();
+  const palette = theme.palette;
   const [cfg, setCfg] = useState<Config>(DEFAULT_CONFIG);
   const [portInput, setPortInput] = useState("4317");
   const [installed, setInstalled] = useState(false);
   const [endpoint, setEndpoint] = useState("");
   const [hookBlock, setHookBlock] = useState("");
-  const [rollup, setRollup] = useState<Rollup>("grey");
-  const [sessionCount, setSessionCount] = useState(0);
   const [status, setStatus] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const flashTimer = useRef<number | undefined>(undefined);
 
@@ -51,24 +46,7 @@ export default function Settings() {
       })
       .catch(() => {});
     refreshHooks();
-    invoke<SessionsPayload>("get_snapshot")
-      .then((p) => {
-        setRollup(p.rollup);
-        setSessionCount(p.sessions.length);
-      })
-      .catch(() => {});
   }, [refreshHooks]);
-
-  // Live engine status.
-  useEffect(() => {
-    const un = listen<SessionsPayload>("sessions-updated", (e) => {
-      setRollup(e.payload.rollup);
-      setSessionCount(e.payload.sessions.length);
-    });
-    return () => {
-      un.then((u) => u());
-    };
-  }, []);
 
   // Persist a full config and reflect backend errors.
   const persist = useCallback(
@@ -165,169 +143,282 @@ export default function Settings() {
 
   return (
     <main className="settings">
-      <header className="sHeader">
-        <span className="sRollup" style={{ background: ROLLUP_COLOR[rollup] }} />
-        <div>
-          <h1>Beacon</h1>
-          <p className="sSub">
-            {ROLLUP_LABEL[rollup]} · {sessionCount} session{sessionCount === 1 ? "" : "s"}
-          </p>
-        </div>
-      </header>
+      {!installed && (
+        <Onboarding hookBlock={hookBlock} onInstall={install} onCopy={copyBlock} palette={palette} />
+      )}
 
-      <section className="sCard">
-        <h2>Notifications</h2>
-        <p className="sMuted">Fired on state transitions only — never while idle.</p>
-        {(Object.keys(STATE_META) as StateKey[]).map((key) => (
-          <StateRow
-            key={key}
-            color={STATE_COLOR[key]}
-            title={STATE_META[key].title}
-            hint={STATE_META[key].hint}
-            value={cfg[key]}
-            onChange={(partial) => patchState(key, partial)}
-          />
-        ))}
+      <Section label="Notifications">
+        <div className="sCard">
+          {(Object.keys(STATE_META) as StateKey[]).map((key, i) => (
+            <StateRow
+              key={key}
+              first={i === 0}
+              color={palette.states[key]}
+              shape={shapeForState(key)}
+              title={STATE_META[key].title}
+              hint={STATE_META[key].hint}
+              value={cfg[key]}
+              onChange={(partial) => patchState(key, partial)}
+            />
+          ))}
+        </div>
         <label className="sCheckRow">
-          <input
-            type="checkbox"
+          <Toggle
             checked={cfg.notify_idle}
-            onChange={(e) => patch({ notify_idle: e.target.checked })}
+            onChange={(v) => patch({ notify_idle: v })}
           />
           <span>Notify when a session goes idle (stale)</span>
         </label>
-      </section>
+      </Section>
 
-      <section className="sCard">
-        <h2>Listener</h2>
-        <div className="sField">
-          <label htmlFor="port">Port</label>
-          <div className="sInline">
-            <input
-              id="port"
-              className="sNum"
-              type="number"
-              min={1024}
-              max={65535}
-              value={portInput}
-              onChange={(e) => setPortInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && applyPort()}
+      <Section label="General">
+        <div className="sCard">
+          <div className="sRow">
+            <div className="sRowText">
+              <span className="sRowTitle">Listener port</span>
+              <span className="sRowHint">Where the Claude Code hook sends events</span>
+            </div>
+            <div className="sChip">
+              <span className="sChipPre">:</span>
+              <input
+                className="sChipInput"
+                type="number"
+                min={1024}
+                max={65535}
+                value={portInput}
+                onChange={(e) => setPortInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && applyPort()}
+                onBlur={() => portInput !== String(cfg.port) && applyPort()}
+              />
+            </div>
+          </div>
+
+          <div className="sRow">
+            <div className="sRowText">
+              <span className="sRowTitle">Stale timeout</span>
+              <span className="sRowHint">Mark a silent session grey after</span>
+            </div>
+            <div className="sChip">
+              <input
+                className="sChipInput sChipInputWide"
+                type="number"
+                min={1}
+                max={1440}
+                value={cfg.stale_timeout_min}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  if (Number.isFinite(v) && v >= 1) patch({ stale_timeout_min: v });
+                }}
+              />
+              <span className="sChipSuf">min</span>
+            </div>
+          </div>
+
+          <div className="sRow">
+            <div className="sRowText">
+              <span className="sRowTitle">Launch at login</span>
+              <span className="sRowHint">Start Beacon quietly in the tray</span>
+            </div>
+            <Toggle
+              checked={cfg.launch_on_login}
+              onChange={(v) => patch({ launch_on_login: v })}
             />
-            <button onClick={applyPort}>Apply</button>
+          </div>
+
+          <div className="sRow">
+            <div className="sRowText">
+              <span className="sRowTitle">Theme</span>
+              <span className="sRowHint">Shape set + color map</span>
+            </div>
+            <div className="sSegment" role="radiogroup" aria-label="Theme">
+              {THEME_LIST.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={cfg.theme === t.id}
+                  className={`sSeg ${cfg.theme === t.id ? "on" : ""}`}
+                  onClick={() => patch({ theme: t.id })}
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
-        <p className="sMuted">
-          Changing the port rebinds the local listener and updates{" "}
-          <code>~/.claude/settings.json</code> if hooks are installed.
-        </p>
+      </Section>
 
-        <div className="sField">
-          <label htmlFor="stale">Stale timeout (min)</label>
-          <input
-            id="stale"
-            className="sNum"
-            type="number"
-            min={1}
-            max={1440}
-            value={cfg.stale_timeout_min}
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10);
-              if (Number.isFinite(v) && v >= 1) patch({ stale_timeout_min: v });
-            }}
-          />
+      <Section label="Claude Code hooks">
+        <div className="sCard sCardPad">
+          <div className="sHookStatus">
+            <StateGlyph
+              shape={installed ? "check" : "ring"}
+              color={installed ? palette.states.ready : palette.stale}
+              size={16}
+            />
+            <span className="sHookLabel">{installed ? "Hook installed" : "Not installed"}</span>
+            <span className="sHookPath">~/.claude/settings.json</span>
+          </div>
+          <div className="sHookBtns">
+            <button className="sBtn" onClick={install}>
+              {installed ? "Reinstall" : "Install"}
+            </button>
+            <button className="sBtn sBtnDanger" onClick={uninstall} disabled={!installed}>
+              Uninstall
+            </button>
+            <button className="sBtn" onClick={copyBlock} disabled={!hookBlock}>
+              Copy config
+            </button>
+          </div>
+          <p className="sHookNote">
+            Beacon detects sessions via hooks that POST to <code>{endpoint}</code>.
+          </p>
+          <pre className="sCode">{hookBlock}</pre>
         </div>
-
-        <label className="sCheckRow">
-          <input
-            type="checkbox"
-            checked={cfg.launch_on_login}
-            onChange={(e) => patch({ launch_on_login: e.target.checked })}
-          />
-          <span>Launch Beacon on login</span>
-        </label>
-      </section>
-
-      <section className="sCard">
-        <h2>
-          Hooks
-          <span className={`sBadge ${installed ? "on" : "off"}`}>
-            {installed ? "Installed" : "Not installed"}
-          </span>
-        </h2>
-        <p className="sMuted">
-          Beacon detects sessions via Claude Code hooks that POST to <code>{endpoint}</code>.
-        </p>
-        <div className="sButtons">
-          <button onClick={install}>{installed ? "Reinstall" : "Install"}</button>
-          <button onClick={uninstall} disabled={!installed}>
-            Uninstall
-          </button>
-          <button onClick={copyBlock} disabled={!hookBlock}>
-            Copy config
-          </button>
-        </div>
-        <details>
-          <summary>Copy-paste fallback</summary>
-          <pre className="sBlock">{hookBlock}</pre>
-        </details>
-      </section>
+      </Section>
 
       {status && <div className={`sToast ${status.kind}`}>{status.msg}</div>}
     </main>
   );
 }
 
+function Section({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <section className="sSection">
+      <div className="sSectionLabel">{label}</div>
+      {children}
+    </section>
+  );
+}
+
+function Toggle({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      className={`sToggle ${checked ? "on" : ""}`}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="sToggleKnob" />
+    </button>
+  );
+}
+
+function SoundIcon({ on }: { on: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 9 H8.5 L12.5 5 V19 L8.5 15 H5 Z" />
+      {on ? (
+        <path d="M16.5 9.5 a4 4 0 0 1 0 5" fill="none" strokeLinecap="round" />
+      ) : (
+        <>
+          <line x1="16" y1="9.5" x2="20.5" y2="14.5" strokeLinecap="round" />
+          <line x1="20.5" y1="9.5" x2="16" y2="14.5" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 function StateRow({
+  first,
   color,
+  shape,
   title,
   hint,
   value,
   onChange,
 }: {
+  first: boolean;
   color: string;
+  shape: "square" | "dot" | "check" | "ring";
   title: string;
   hint: string;
   value: StateNotify;
   onChange: (partial: Partial<StateNotify>) => void;
 }) {
   return (
-    <div className="sStateRow">
-      <span className="sStateDot" style={{ background: color }} />
+    <div className={`sStateRow ${first ? "first" : ""}`}>
+      <StateGlyph shape={shape} color={color} size={18} />
       <div className="sStateText">
         <span className="sStateTitle">{title}</span>
         <span className="sStateHint">{hint}</span>
       </div>
       <div className="sStateControls">
-        <label className="sToggle" title="Notify">
-          <input
-            type="checkbox"
-            checked={value.enabled}
-            onChange={(e) => onChange({ enabled: e.target.checked })}
-          />
-          <span>Notify</span>
-        </label>
-        <label className="sToggle" title="Play a sound">
-          <input
-            type="checkbox"
-            checked={value.sound}
-            disabled={!value.enabled}
-            onChange={(e) => onChange({ sound: e.target.checked })}
-          />
-          <span>Sound</span>
-        </label>
-        <select
-          className="sSelect"
-          value={value.sound_name}
-          disabled={!value.enabled || !value.sound}
-          onChange={(e) => onChange({ sound_name: e.target.value })}
+        {value.enabled && value.sound && (
+          <select
+            className="sSelect"
+            value={value.sound_name}
+            onChange={(e) => onChange({ sound_name: e.target.value })}
+            title="Notification sound"
+          >
+            {SOUNDS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
+        <button
+          type="button"
+          className={`sSoundBtn ${value.sound ? "on" : ""}`}
+          disabled={!value.enabled}
+          onClick={() => onChange({ sound: !value.sound })}
+          title={value.sound ? "Sound on" : "Sound off"}
         >
-          {SOUNDS.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+          <SoundIcon on={value.sound} />
+        </button>
+        <Toggle checked={value.enabled} onChange={(v) => onChange({ enabled: v })} />
       </div>
     </div>
+  );
+}
+
+function Onboarding({
+  hookBlock,
+  onInstall,
+  onCopy,
+  palette,
+}: {
+  hookBlock: string;
+  onInstall: () => void;
+  onCopy: () => void;
+  palette: ThemePalette;
+}) {
+  return (
+    <section className="sOnboard">
+      <div className="sOnboardGlyphs">
+        <StateGlyph shape="square" color={palette.states.needs_you} size={22} />
+        <StateGlyph shape="dot" color={palette.states.working} size={22} />
+        <StateGlyph shape="check" color={palette.states.ready} size={22} />
+        <StateGlyph shape="ring" color={palette.stale} size={22} />
+      </div>
+      <h1 className="sOnboardTitle">One quick setup</h1>
+      <p className="sOnboardDesc">
+        Beacon watches your Claude Code sessions through a small hook in its config. Add it
+        once and Beacon will know the moment a session needs you, starts working, or finishes
+        its turn.
+      </p>
+      <button className="sOnboardBtn" onClick={onInstall}>
+        Set up automatically
+      </button>
+      <button className="sOnboardLink" onClick={onCopy} disabled={!hookBlock}>
+        Copy the snippet instead ›
+      </button>
+      <pre className="sCode sOnboardCode">{hookBlock}</pre>
+      <p className="sOnboardFoot">
+        Beacon only appends its hook · reversible anytime below · no code leaves your machine
+      </p>
+    </section>
   );
 }

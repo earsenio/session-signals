@@ -1,11 +1,12 @@
 /* The widget window is frameless + transparent: the OS shows nothing but what
-   we paint. Keep html/body transparent so the rounded card floats cleanly. */
+   we paint. Keep html/body transparent so the rounded card floats cleanly.
+   All values reference the token layer (src/themes/tokens.css). */
 html,
 body {
   margin: 0;
   background: transparent;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
 }
 
 *,
@@ -15,22 +16,17 @@ body {
 }
 
 .widget {
-  --bg: rgba(26, 27, 30, 0.92);
-  --panel: rgba(255, 255, 255, 0.05);
-  --text: #e9ecef;
-  --muted: #9096a0;
-  --border: rgba(255, 255, 255, 0.09);
-
   display: flex;
   flex-direction: column;
   height: 100vh;
   color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  background: var(--widget-bg);
+  border: 1px solid var(--widget-border);
+  border-radius: var(--r-card);
   overflow: hidden;
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-float);
   user-select: none;
 }
 
@@ -38,9 +34,8 @@ body {
 .wHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 8px 9px 12px;
-  border-bottom: 1px solid var(--border);
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) 10px;
   cursor: grab;
 }
 
@@ -48,27 +43,33 @@ body {
   cursor: grabbing;
 }
 
-.wHeaderDot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 0 6px currentColor;
+.wHeaderGlyph {
+  display: inline-flex;
+  flex: none;
 }
 
-.wHeaderTitle {
-  flex: 1;
-  font-size: 13px;
+.wTitle {
+  font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+.wHeaderStatus {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.wHeaderSpacer {
+  flex: 1;
 }
 
 .wIconBtn {
   background: transparent;
   border: none;
   color: var(--muted);
-  font-size: 14px;
-  line-height: 1;
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -78,19 +79,35 @@ body {
   justify-content: center;
 }
 
+.wIconBtn svg {
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* The hide icon is line-only; don't fill it. */
+.wIconBtn:last-child svg {
+  fill: none;
+}
+
 .wIconBtn:hover {
-  background: var(--panel);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text);
+}
+
+.wDivider {
+  height: 1px;
+  background: var(--hairline-soft);
 }
 
 /* --- Expanded list --- */
 .wList {
   list-style: none;
   margin: 0;
-  padding: 8px;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
   overflow-y: auto;
   flex: 1;
 }
@@ -98,69 +115,139 @@ body {
 .wRow {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 9px;
-  background: var(--panel);
-  border-radius: 8px;
-  font-size: 12.5px;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  min-height: 56px;
 }
 
-.wRowDot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.wRow + .wRow {
+  border-top: 1px solid var(--hairline-faint);
+}
+
+.wRowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .wRowLabel {
-  font-weight: 600;
-  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.wRowFolder {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  flex: none;
+}
+
+.wRowBranch {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--label-2);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.wBranchIcon {
+  color: var(--branch-icon);
 }
 
 .wRowState {
-  color: var(--muted);
-  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 500;
 }
 
 .wRowAge {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-  min-width: 38px;
-  text-align: right;
-  flex-shrink: 0;
 }
 
+.wChevron {
+  font-size: 17px;
+  color: var(--text-3);
+  flex: none;
+}
+
+/* --- Empty state --- */
 .wEmpty {
   flex: 1;
-  margin: 0;
+  padding: var(--sp-7) 24px 32px;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  font-size: 12.5px;
+  gap: var(--sp-3);
 }
 
-/* --- Compact strip --- */
-.wStrip {
+.wEmptyGlyph {
+  opacity: 0.55;
+  display: inline-flex;
+}
+
+.wEmptyTitle {
+  font-size: 13px;
+  font-weight: 500;
+  color: #b6bbc2;
+}
+
+.wEmptyHint {
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.55;
+  max-width: 210px;
+}
+
+/* --- Compact pill (the whole window when collapsed) --- */
+.widgetCompact {
+  /* A clean rounded bar; no header/divider/footer. */
+  border-radius: var(--r-pill);
+}
+
+.wPill {
   flex: 1;
   display: flex;
-  flex-wrap: wrap;
-  align-content: center;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
-  padding: 12px;
-  cursor: grab;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-4);
+  cursor: pointer;
+  overflow: hidden;
 }
 
-.wStripDot {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 0 5px currentColor;
+.wPill:active {
+  cursor: grabbing;
+}
+
+.wGrip {
+  fill: var(--text-3);
+  flex: none;
+}
+
+.wStripGlyph {
+  display: inline-flex;
+  flex: none;
+}
+
+.wStripDivider {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.wStripCount {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--label-2);
 }
 
 .wStripEmpty {
@@ -168,23 +255,19 @@ body {
   font-size: 12px;
 }
 
-/* --- Footer (opacity) --- */
+/* --- Footer (status strip) --- */
 .wFooter {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border-top: 1px solid var(--border);
+  justify-content: space-between;
+  padding: 9px var(--sp-4);
+  border-top: 1px solid var(--hairline-soft);
 }
 
-.wFooterIcon {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.wOpacity {
-  flex: 1;
-  height: 3px;
-  cursor: pointer;
-  accent-color: #5c7cfa;
+.wFootItem {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
 }

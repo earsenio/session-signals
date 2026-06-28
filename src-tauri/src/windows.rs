@@ -9,8 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_store::StoreExt;
 
@@ -23,9 +23,16 @@ const KEY_POS: &str = "widget.position";
 const KEY_VISIBLE: &str = "widget.visible";
 const KEY_COMPACT: &str = "widget.compact";
 const KEY_OPACITY: &str = "widget.opacity";
+/// The expanded height to restore to when un-minifying. Captured the moment the
+/// user collapses, so "original size" means whatever they last had open.
+const KEY_EXPANDED_H: &str = "widget.expandedHeight";
 
-const DEFAULT_W: f64 = 300.0;
+const DEFAULT_W: f64 = 320.0;
 const DEFAULT_H: f64 = 420.0;
+/// Collapsed height: the headerless pill is just a single non-wrapping row of
+/// glyphs (`Widget.css` `.wPill`), `flex: 1` and vertically centered, so a few
+/// px of slack only adds centering — it never clips.
+const COMPACT_H: f64 = 48.0;
 
 /// View preferences shared with the webview. The window position is persisted
 /// separately (it changes on drag, not via the UI).
@@ -53,6 +60,9 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let prefs = load_prefs(app);
     let window = build_window(app)?;
     position_window(app, &window);
+    // Restore the last mode's size (built at the expanded default; collapse or
+    // grow to the persisted state before the first paint).
+    apply_size(app, &window, prefs.compact);
     if prefs.visible {
         window.show()?;
     }
@@ -65,7 +75,9 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, WIDGET_LABEL, WebviewUrl::App("index.html".into()))
         .title("Beacon")
         .inner_size(DEFAULT_W, DEFAULT_H)
-        .min_inner_size(200.0, 120.0)
+        // Min height must sit below COMPACT_H or set_size would be clamped and
+        // the collapse couldn't shrink the window.
+        .min_inner_size(200.0, 40.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -157,8 +169,57 @@ pub fn load_prefs(app: &AppHandle) -> WidgetPrefs {
     prefs
 }
 
+/// Toggle the collapsed/minified view. Besides persisting the preference this
+/// resizes the actual window: collapsing remembers the current expanded height
+/// then shrinks to `COMPACT_H`; expanding restores the remembered height. The
+/// width is left untouched, and manual resize is disabled while collapsed.
 pub fn set_compact(app: &AppHandle, compact: bool) {
     set_bool(app, KEY_COMPACT, compact);
+    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
+        if compact {
+            // Capture the height we're collapsing from (the window is still
+            // expanded at this point) so expanding restores exactly that.
+            let (_, h) = logical_inner(&window);
+            store_f64(app, KEY_EXPANDED_H, h);
+        }
+        apply_size(app, &window, compact);
+    }
+}
+
+/// Set the window to the size for `compact` without mutating the saved expanded
+/// height (used both by the toggle, after it has captured the height, and at
+/// startup). Width is preserved; manual resize is locked while collapsed.
+fn apply_size(app: &AppHandle, window: &WebviewWindow, compact: bool) {
+    let (w, _) = logical_inner(window);
+    let target_h = if compact {
+        COMPACT_H
+    } else {
+        load_f64(app, KEY_EXPANDED_H).unwrap_or(DEFAULT_H)
+    };
+    let _ = window.set_size(LogicalSize::new(w, target_h));
+    let _ = window.set_resizable(!compact);
+}
+
+/// The window's current inner size in logical (DPI-independent) px. Falls back
+/// to the defaults if the platform query fails.
+fn logical_inner(window: &WebviewWindow) -> (f64, f64) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    match window.inner_size() {
+        Ok(s) => (s.width as f64 / scale, s.height as f64 / scale),
+        Err(_) => (DEFAULT_W, DEFAULT_H),
+    }
+}
+
+fn store_f64(app: &AppHandle, key: &str, v: f64) {
+    if let Ok(store) = app.store(STORE_FILE) {
+        store.set(key, v);
+        let _ = store.save();
+    }
+}
+
+fn load_f64(app: &AppHandle, key: &str) -> Option<f64> {
+    let store = app.store(STORE_FILE).ok()?;
+    store.get(key).and_then(|v| v.as_f64())
 }
 
 pub fn set_opacity(app: &AppHandle, opacity: f64) {

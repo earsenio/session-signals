@@ -58,6 +58,10 @@ pub struct Config {
     /// Notify when a session goes idle/stale. Off by default (spec: never notify
     /// on stale-drop unless enabled).
     pub notify_idle: bool,
+    /// Active theme id (mirrors src/themes). The palette itself lives in the
+    /// frontend; the backend only stores the chosen id and reacts to the palette
+    /// the webview pushes via `set_tray_palette`.
+    pub theme: String,
     pub needs_you: StateNotify,
     pub working: StateNotify,
     pub ready: StateNotify,
@@ -71,6 +75,7 @@ impl Default for Config {
             stale_timeout_min: DEFAULT_STALE_MIN,
             launch_on_login: false,
             notify_idle: false,
+            theme: "classic".to_string(),
             // Spec defaults: Red on (sound off); Orange/Green off.
             needs_you: StateNotify::new(true, "Ping"),
             working: StateNotify::new(false, "Pop"),
@@ -89,6 +94,9 @@ impl Config {
         }
         if self.stale_timeout_min == 0 {
             self.stale_timeout_min = DEFAULT_STALE_MIN;
+        }
+        if self.theme.trim().is_empty() {
+            self.theme = "classic".to_string();
         }
         self.version = CURRENT_VERSION;
         self

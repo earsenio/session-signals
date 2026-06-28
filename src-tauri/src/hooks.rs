@@ -10,14 +10,31 @@ use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
 /// Hook events Beacon wires up. These drive the state engine (see CLAUDE.md).
+/// Grouped by the role each plays in the state machine (see `engine::apply`):
+/// session lifecycle, work-start (→ Working), heartbeats (keep Working), and
+/// terminal (→ Ready / NeedsYou). Verified against Claude Code 2.1.195; all
+/// support `type:"http"` hooks except `SessionStart` (see note below).
 pub const EVENTS: &[&str] = &[
+    // Session lifecycle.
     "SessionStart",
-    "UserPromptSubmit",
-    "PostToolUse",
-    "Notification",
-    "Stop",
-    "SubagentStop",
     "SessionEnd",
+    // Work-start → Working.
+    "UserPromptSubmit",
+    "UserPromptExpansion",
+    "PreToolUse",
+    "SubagentStart",
+    "PreCompact",
+    // Heartbeats → keep current Working state alive.
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PostToolBatch",
+    // Terminal → Ready.
+    "Stop",
+    "StopFailure",
+    "SubagentStop",
+    "PostCompact",
+    // Blocked on the user → NeedsYou (filtered by notification_type).
+    "Notification",
 ];
 
 /// The localhost endpoint Claude Code POSTs each hook to.

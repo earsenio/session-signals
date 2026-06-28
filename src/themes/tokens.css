@@ -1,0 +1,74 @@
+/* Design tokens — the single source for surfaces, type, spacing, radii, the
+   floating-window shadow, and component sizes. Values are literal from the
+   Beacon "Instrument" design sheet. State colors are NOT here: they live in the
+   theme data (src/themes) and are written to `--state-*` by applyTheme so the
+   theme switch is live. Components must reference these vars, never hard-code. */
+
+:root {
+  /* Surfaces & text (dark) */
+  --bg: #0b0c0e; /* deepest */
+  --panel: #15171b;
+  --elevated: #1b1d22;
+  --hairline: rgba(255, 255, 255, 0.085); /* ~8.5% */
+  --hairline-soft: rgba(255, 255, 255, 0.06);
+  --hairline-faint: rgba(255, 255, 255, 0.045);
+  --text: #e6e8ec; /* primary */
+  --text-2: #8b919c; /* secondary */
+  --text-3: #565b64; /* tertiary */
+  --muted: #6e737d; /* timers / inline meta */
+  --label-2: #787d86; /* row branch / descriptions */
+  --branch-icon: #565b64;
+
+  /* Floating widget chrome */
+  --widget-bg: rgba(21, 23, 27, 0.94);
+  --widget-border: rgba(255, 255, 255, 0.085);
+
+  /* Type — Geist / Geist Mono (bundled offline via @fontsource) */
+  --font-sans: "Geist Sans", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  /* Spacing scale: 4 8 11 13 18 22 34 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 11px;
+  --sp-4: 13px;
+  --sp-5: 18px;
+  --sp-6: 22px;
+  --sp-7: 34px;
+
+  /* Radii */
+  --r-chip: 8px;
+  --r-pill: 11px;
+  --r-card: 14px;
+  --r-window: 12px;
+
+  /* Elevation */
+  --shadow-float: 0 22px 55px -14px rgba(0, 0, 0, 0.72), 0 0 0 0.5px rgba(0, 0, 0, 0.5);
+  --shadow-compact: 0 14px 40px -12px rgba(0, 0, 0, 0.7);
+
+  /* Component sizes */
+  --widget-w: 320px;
+  --glyph-row: 22px;
+  --glyph-header: 13px;
+
+  /* State colors — overwritten live by applyTheme (Classic shown as fallback) */
+  --state-needs: #f4595e;
+  --state-working: #f5a742;
+  --state-ready: #46c98b;
+  --state-none: #7c828d;
+}
+
+/* The working glyph's outer ring breathes. Shared by webview glyphs. */
+@keyframes beaconPulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.5;
+  }
+  70% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}

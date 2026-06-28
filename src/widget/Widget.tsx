@@ -1,30 +1,49 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  ROLLUP_COLOR,
   ROLLUP_LABEL,
-  STATE_COLOR,
-  STATE_LABEL,
+  type Rollup,
+  type SessionState,
   type SessionsPayload,
   type SessionView,
   type WidgetPrefs,
 } from "../state/types";
+import { useTheme } from "../themes/useTheme";
+import type { ThemePalette } from "../themes";
+import { shapeForRollup, shapeForState, StateGlyph } from "../components/StateGlyph";
 import "./Widget.css";
 
-const STALE_COLOR = "#9ca3af";
-
+/// m:ss for the first hour, h:mm:ss beyond — matches the design's "0:08", "14:03".
 function formatAge(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  if (m < 60) return `${m}m`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+  const s = seconds % 60;
+  const m = Math.floor(seconds / 60) % 60;
+  const h = Math.floor(seconds / 3600);
+  const ss = String(s).padStart(2, "0");
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${ss}`;
+  return `${m}:${ss}`;
+}
+
+/// The engine ships a combined label ("folder (branch)"); split it for the
+/// two-tone row presentation. Pure presentation — the engine is unchanged.
+function splitLabel(label: string): { folder: string; branch: string | null } {
+  const m = label.match(/^(.*) \(([^)]+)\)$/);
+  return m ? { folder: m[1], branch: m[2] } : { folder: label, branch: null };
+}
+
+/// Row state text per the design (richer than the tray tooltips).
+const ROW_STATE_TEXT: Record<SessionState, string> = {
+  needs_you: "Needs your input",
+  working: "Working",
+  ready: "Ready for you",
+};
+
+function rowColor(palette: ThemePalette, s: LiveSession): string {
+  return s.stale ? palette.stale : palette.states[s.state];
 }
 
 /// Subscribe to the engine's pushes and tick time-in-state locally between them.
-/// The engine only re-emits when something changes, so a Ready session sitting
-/// idle still needs the clock to advance client-side — we add the seconds
-/// elapsed since the last payload to each session's `seconds_in_state`.
 function useEngineState() {
   const [payload, setPayload] = useState<SessionsPayload>({ rollup: "grey", sessions: [] });
   const [baseAt, setBaseAt] = useState<number>(() => Date.now());
@@ -61,50 +80,163 @@ function useEngineState() {
 
 type LiveSession = SessionView & { liveSeconds: number };
 
-function ExpandedRow({ session }: { session: LiveSession }) {
-  const dot = session.stale ? STALE_COLOR : STATE_COLOR[session.state];
-  const stateText = session.stale ? "Stale" : STATE_LABEL[session.state];
+/// Short header summary derived from the rollup + live sessions (presentation).
+function headerStatus(rollup: Rollup, sessions: LiveSession[]): string {
+  const needs = sessions.filter((s) => s.state === "needs_you" && !s.stale).length;
+  if (needs > 0) return `${needs} needs you`;
+  switch (rollup) {
+    case "orange":
+      return "Working";
+    case "green":
+      return "Ready";
+    default:
+      return "idle";
+  }
+}
+
+function ExpandedRow({ session, palette }: { session: LiveSession; palette: ThemePalette }) {
+  const { folder, branch } = splitLabel(session.label);
+  const color = rowColor(palette, session);
+  const stateText = session.stale ? "No response" : ROW_STATE_TEXT[session.state];
   return (
     <li className="wRow" style={{ opacity: session.stale ? 0.5 : 1 }}>
-      <span className="wRowDot" style={{ background: dot }} />
-      <span className="wRowLabel">{session.label}</span>
-      <span className="wRowState">{stateText}</span>
-      <span className="wRowAge">{formatAge(session.liveSeconds)}</span>
+      <StateGlyph
+        shape={session.stale ? "ring" : shapeForState(session.state)}
+        color={color}
+        size={22}
+        pulse={session.state === "working" && !session.stale}
+      />
+      <div className="wRowMain">
+        <div className="wRowLabel">
+          <span className="wRowFolder">{folder}</span>
+          {branch && (
+            <span className="wRowBranch">
+              <span className="wBranchIcon">⑃ </span>
+              {branch}
+            </span>
+          )}
+        </div>
+        <div className="wRowState" style={{ color }}>
+          {stateText} <span className="wRowAge">· {formatAge(session.liveSeconds)}</span>
+        </div>
+      </div>
+      <span className="wChevron">›</span>
     </li>
   );
 }
 
-function CompactStrip({ sessions }: { sessions: LiveSession[] }) {
-  if (sessions.length === 0) {
-    return (
-      <div className="wStrip" data-tauri-drag-region>
-        <span className="wStripEmpty" data-tauri-drag-region>
-          idle
-        </span>
-      </div>
-    );
-  }
+/// The collapsed view: a headerless pill of just the state glyphs (one per
+/// session) + a count. Per the design it "drags anywhere, stays on top, click
+/// to expand". Drag and click share the same surface, so we only begin an OS
+/// window drag once the pointer actually moves past a small threshold — a
+/// stationary press is treated as a click and expands. (Hence no
+/// `data-tauri-drag-region`, which would start dragging on every mousedown and
+/// swallow the click.)
+function CompactPill({
+  sessions,
+  palette,
+  onExpand,
+}: {
+  sessions: LiveSession[];
+  palette: ThemePalette;
+  onExpand: () => void;
+}) {
+  // Tracks the press in flight: where it began and whether it became a drag.
+  const press = useRef<{ x: number; y: number; dragging: boolean } | null>(null);
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    press.current = { x: e.screenX, y: e.screenY, dragging: false };
+
+    const move = (me: MouseEvent) => {
+      const p = press.current;
+      if (!p || p.dragging) return;
+      if (Math.abs(me.screenX - p.x) > 4 || Math.abs(me.screenY - p.y) > 4) {
+        // Real drag: hand off to the OS and stop listening (the drag loop
+        // takes over; the trailing click, if any, is ignored below).
+        p.dragging = true;
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        getCurrentWindow().startDragging().catch(() => {});
+      }
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  }, []);
+
+  const onClick = useCallback(() => {
+    const dragged = press.current?.dragging ?? false;
+    press.current = null;
+    if (!dragged) onExpand();
+  }, [onExpand]);
+
   return (
-    <div className="wStrip" data-tauri-drag-region>
-      {sessions.map((s) => (
-        <span
-          key={s.session_id}
-          className="wStripDot"
-          title={`${s.label} — ${s.stale ? "Stale" : STATE_LABEL[s.state]}`}
-          style={{
-            background: s.stale ? STALE_COLOR : STATE_COLOR[s.state],
-            opacity: s.stale ? 0.5 : 1,
-          }}
-        />
-      ))}
+    <div
+      className="wPill"
+      onMouseDown={onMouseDown}
+      onClick={onClick}
+      title="Click to expand"
+    >
+      <svg className="wGrip" width="7" height="16" viewBox="0 0 7 16" aria-hidden="true">
+        <circle cx="1.5" cy="3" r="1.4" />
+        <circle cx="5.5" cy="3" r="1.4" />
+        <circle cx="1.5" cy="8" r="1.4" />
+        <circle cx="5.5" cy="8" r="1.4" />
+        <circle cx="1.5" cy="13" r="1.4" />
+        <circle cx="5.5" cy="13" r="1.4" />
+      </svg>
+      {sessions.length === 0 ? (
+        <span className="wStripEmpty">idle</span>
+      ) : (
+        <>
+          {sessions.map((s) => (
+            <span
+              key={s.session_id}
+              className="wStripGlyph"
+              style={{ opacity: s.stale ? 0.5 : 1 }}
+              title={`${s.label} — ${s.stale ? "No response" : ROW_STATE_TEXT[s.state]}`}
+            >
+              <StateGlyph
+                shape={s.stale ? "ring" : shapeForState(s.state)}
+                color={rowColor(palette, s)}
+                size={17}
+                pulse={s.state === "working" && !s.stale}
+              />
+            </span>
+          ))}
+          <span className="wStripDivider" />
+          <span className="wStripCount">{sessions.length}</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function EmptyBody({ palette }: { palette: ThemePalette }) {
+  return (
+    <div className="wEmpty">
+      <span className="wEmptyGlyph">
+        <StateGlyph shape="ring" color={palette.stale} size={30} />
+      </span>
+      <div className="wEmptyTitle">No active sessions</div>
+      <div className="wEmptyHint">
+        Start a Claude Code session in your terminal and it’ll appear here.
+      </div>
     </div>
   );
 }
 
 export default function Widget() {
   const { rollup, sessions } = useEngineState();
+  const theme = useTheme();
+  const palette = theme.palette;
   const [compact, setCompact] = useState(false);
   const [opacity, setOpacity] = useState(0.95);
+  const [port, setPort] = useState<number | null>(null);
 
   useEffect(() => {
     invoke<WidgetPrefs>("widget_prefs")
@@ -112,6 +244,10 @@ export default function Widget() {
         setCompact(p.compact);
         setOpacity(p.opacity);
       })
+      .catch(() => {});
+    // For the footer status strip; read-only, no engine change.
+    invoke<{ port: number }>("get_config")
+      .then((c) => setPort(c.port))
       .catch(() => {});
   }, []);
 
@@ -123,65 +259,77 @@ export default function Widget() {
     });
   }, []);
 
-  const changeOpacity = useCallback((value: number) => {
-    setOpacity(value);
-    invoke("widget_set_opacity", { opacity: value }).catch(() => {});
-  }, []);
-
   const hide = useCallback(() => {
     invoke("widget_hide").catch(() => {});
   }, []);
 
+  const rollupShape = shapeForRollup(rollup);
+  const rollupColor = rollup === "grey" ? palette.stale : palette.rollups[rollup];
+
+  // Collapsed: nothing but the draggable, click-to-expand pill.
+  if (compact) {
+    return (
+      <div className="widget widgetCompact" style={{ opacity }}>
+        <CompactPill sessions={sessions} palette={palette} onExpand={toggleCompact} />
+      </div>
+    );
+  }
+
   return (
     <div className="widget" style={{ opacity }}>
       <header className="wHeader" data-tauri-drag-region>
-        <span
-          className="wHeaderDot"
-          data-tauri-drag-region
-          style={{ background: ROLLUP_COLOR[rollup] }}
-          title={ROLLUP_LABEL[rollup]}
-        />
-        <span className="wHeaderTitle" data-tauri-drag-region>
+        <span className="wHeaderGlyph" data-tauri-drag-region>
+          <StateGlyph
+            shape={rollupShape}
+            color={rollupColor}
+            size={13}
+            pulse={rollup === "orange"}
+          />
+        </span>
+        <span className="wTitle" data-tauri-drag-region>
           Beacon
         </span>
+        <span className="wHeaderStatus" data-tauri-drag-region title={ROLLUP_LABEL[rollup]}>
+          {headerStatus(rollup, sessions)}
+        </span>
+        <span className="wHeaderSpacer" data-tauri-drag-region />
         <button
           className="wIconBtn"
           onClick={toggleCompact}
           title={compact ? "Expand" : "Compact"}
         >
-          {compact ? "▦" : "▤"}
+          <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="5" cy="12" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="19" cy="12" r="2" />
+          </svg>
         </button>
         <button className="wIconBtn" onClick={hide} title="Hide widget">
-          ×
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <line x1="5" y1="6" x2="19" y2="6" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+            <line x1="5" y1="18" x2="19" y2="18" />
+          </svg>
         </button>
       </header>
 
-      {compact ? (
-        <CompactStrip sessions={sessions} />
-      ) : sessions.length === 0 ? (
-        <p className="wEmpty">No live sessions.</p>
+      <div className="wDivider" />
+
+      {sessions.length === 0 ? (
+        <EmptyBody palette={palette} />
       ) : (
         <ul className="wList">
           {sessions.map((s) => (
-            <ExpandedRow key={s.session_id} session={s} />
+            <ExpandedRow key={s.session_id} session={s} palette={palette} />
           ))}
         </ul>
       )}
 
       <footer className="wFooter">
-        <span className="wFooterIcon" title="Opacity">
-          ◐
+        <span className="wFootItem">LISTENING · :{port ?? "—"}</span>
+        <span className="wFootItem">
+          {sessions.length} SESSION{sessions.length === 1 ? "" : "S"}
         </span>
-        <input
-          className="wOpacity"
-          type="range"
-          min={0.3}
-          max={1}
-          step={0.05}
-          value={opacity}
-          onChange={(e) => changeOpacity(parseFloat(e.target.value))}
-          title="Opacity"
-        />
       </footer>
     </div>
   );

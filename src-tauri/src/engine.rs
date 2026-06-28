@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Per-session status. Maps to the traffic-light colors in the spec.
@@ -126,8 +126,15 @@ impl Engine {
 
         match ev.hook_event_name.as_str() {
             "SessionStart" => self.transition_to(ev, State::Ready),
-            "UserPromptSubmit" => self.transition_to(ev, State::Working),
-            "PostToolUse" => {
+            // Any work-start signal means the session is actively running. We
+            // bracket "Working" between these and the terminal events below, so
+            // activity that doesn't begin with a typed prompt — slash-command
+            // expansion, a tool call, a spawned subagent, context compaction —
+            // still shows up. (`/compact` fires PreCompact, never
+            // UserPromptSubmit, which is why it used to stay green.)
+            "UserPromptSubmit" | "UserPromptExpansion" | "PreToolUse" | "SubagentStart"
+            | "PreCompact" => self.transition_to(ev, State::Working),
+            "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" => {
                 // Heartbeat: keep current state, just refresh last_seen. If we
                 // somehow never saw this session start, a tool running means
                 // it's working.
@@ -160,7 +167,13 @@ impl Engine {
                     transition: None,
                 },
             },
-            "Stop" | "SubagentStop" => self.transition_to(ev, State::Ready),
+            // Terminal: the turn (or compaction) ended. `PostCompact` returns a
+            // standalone `/compact` to Ready; mid-turn it briefly shows Ready
+            // until the next work event flips it back (self-healing).
+            // `StopFailure` is a turn ended by an API error.
+            "Stop" | "StopFailure" | "SubagentStop" | "PostCompact" => {
+                self.transition_to(ev, State::Ready)
+            }
             "SessionEnd" => ApplyOutcome {
                 changed: self.sessions.remove(&ev.session_id).is_some(),
                 transition: None,
@@ -309,29 +322,53 @@ impl Engine {
     }
 }
 
-/// Build a human label from a working directory: `basename` plus the git branch
-/// if it can be resolved by reading `<cwd>/.git/HEAD` (no subprocess).
+/// Build a human label from a working directory: the git **repo root**'s
+/// basename plus its branch, if the cwd is inside a repo. We walk up from `cwd`
+/// to find the `.git` directory so a subfolder cwd (e.g. `.../proj/src-tauri`)
+/// still shows the project name and branch rather than the subfolder. Falls
+/// back to `basename(cwd)` when no repo is found. No subprocess.
 pub fn label_for(cwd: &str) -> String {
     if cwd.is_empty() {
         return "session".to_string();
     }
     let path = Path::new(cwd);
-    let base = path
-        .file_name()
+
+    if let Some(root) = find_git_root(path) {
+        let base = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("session")
+            .to_string();
+        return match read_git_branch(&root) {
+            Some(branch) => format!("{base} ({branch})"),
+            None => base,
+        };
+    }
+
+    path.file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(cwd)
-        .to_string();
-
-    match read_git_branch(path) {
-        Some(branch) => format!("{base} ({branch})"),
-        None => base,
-    }
+        .to_string()
 }
 
-/// Resolve the current branch by reading `.git/HEAD`. Returns None if not a git
-/// repo or HEAD is detached / unreadable.
-fn read_git_branch(cwd: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(cwd.join(".git").join("HEAD")).ok()?;
+/// Walk up from `start` to the first ancestor containing a `.git` entry (a
+/// directory for a normal clone, a file for a worktree/submodule). Returns that
+/// ancestor — the repo root. None if no ancestor is a git repo.
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if d.join(".git").exists() {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// Resolve the current branch by reading `<root>/.git/HEAD`. Returns None if
+/// HEAD is detached, unreadable, or the repo uses a `.git` file (worktree).
+fn read_git_branch(root: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
     let head = head.trim();
     // Typical content: "ref: refs/heads/main"
     head.strip_prefix("ref: refs/heads/")
@@ -441,6 +478,32 @@ mod tests {
         e.apply(&ev("UserPromptSubmit", "a"));
         e.apply(&ev("PostToolUse", "a"));
         assert_eq!(e.rollup(), Rollup::Orange);
+    }
+
+    #[test]
+    fn compaction_shows_working_then_ready() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        // A finished turn is Ready/green.
+        e.apply(&ev("SessionStart", "a"));
+        assert_eq!(e.rollup(), Rollup::Green);
+        // `/compact` fires PreCompact (never UserPromptSubmit) → Working/orange.
+        e.apply(&ev("PreCompact", "a"));
+        assert_eq!(e.rollup(), Rollup::Orange);
+        // PostCompact ends compaction → back to Ready/green.
+        e.apply(&ev("PostCompact", "a"));
+        assert_eq!(e.rollup(), Rollup::Green);
+    }
+
+    #[test]
+    fn pretooluse_starts_working() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        // A session first seen via a tool call is Working, even if we never
+        // observed its UserPromptSubmit.
+        let out = e.apply(&ev("PreToolUse", "a"));
+        assert_eq!(e.rollup(), Rollup::Orange);
+        let t = out.transition.expect("new session transitions");
+        assert_eq!(t.from, None);
+        assert_eq!(t.to, State::Working);
     }
 
     #[test]

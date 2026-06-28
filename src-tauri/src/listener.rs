@@ -69,7 +69,16 @@ where
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
             // Respond right away — never block Claude Code on our processing.
-            let _ = request.respond(Response::from_string("ok").with_status_code(200));
+            // Claude Code parses an HTTP hook's response body as JSON, so we
+            // must return a JSON object (not plain text like "ok") or it logs
+            // "HTTP hook must return JSON". An empty object is a no-op decision.
+            let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("valid header");
+            let _ = request.respond(
+                Response::from_string("{}")
+                    .with_status_code(200)
+                    .with_header(header),
+            );
             // Parse leniently. Unknown fields ignored; bad JSON dropped.
             match serde_json::from_str::<HookEvent>(&body) {
                 Ok(ev) if !ev.hook_event_name.is_empty() => on_event(ev),

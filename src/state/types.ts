@@ -25,23 +25,13 @@ export interface WidgetPrefs {
   visible: boolean;
 }
 
+// Appearance (colors, dot style) is NOT defined here — it lives in src/themes
+// so it can be swapped at runtime. These maps are text only.
+
 export const STATE_LABEL: Record<SessionState, string> = {
   needs_you: "Needs you",
   working: "Working",
   ready: "Ready",
-};
-
-export const STATE_COLOR: Record<SessionState, string> = {
-  needs_you: "#e53e3e",
-  working: "#f59e0b",
-  ready: "#22c55e",
-};
-
-export const ROLLUP_COLOR: Record<Rollup, string> = {
-  red: "#e53e3e",
-  orange: "#f59e0b",
-  green: "#22c55e",
-  grey: "#9ca3af",
 };
 
 export const ROLLUP_LABEL: Record<Rollup, string> = {

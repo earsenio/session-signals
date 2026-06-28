@@ -1,16 +1,11 @@
-:root {
-  --bg: #1a1b1e;
-  --panel: #25262b;
-  --panel2: #2c2e33;
-  --text: #e9ecef;
-  --muted: #909296;
-  --border: #373a40;
-  --accent: #5c7cfa;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
-
+/* Settings window. References the token layer (src/themes/tokens.css). The
+   window uses native OS chrome; the design's mac titlebar is context only. */
 * {
   box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-sans);
 }
 
 body {
@@ -20,258 +15,429 @@ body {
 }
 
 .settings {
-  padding: 16px 18px 28px;
+  padding: 22px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 26px;
 }
 
-/* Header */
-.sHeader {
+/* --- Section --- */
+.sSection {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: var(--sp-3);
 }
 
-.sHeader h1 {
-  margin: 0;
-  font-size: 20px;
-}
-
-.sSub {
-  margin: 2px 0 0;
+.sSectionLabel {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
   color: var(--muted);
-  font-size: 12.5px;
-}
-
-.sRollup {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 0 8px currentColor;
-}
-
-/* Cards */
-.sCard {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px 14px 16px;
-}
-
-.sCard h2 {
-  font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  margin: 0 0 10px;
+}
+
+/* --- Cards --- */
+.sCard {
+  background: var(--elevated);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.sCardPad {
+  padding: var(--sp-4);
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: var(--sp-4);
 }
 
-.sMuted {
-  color: var(--muted);
-  font-size: 12px;
-  margin: 0 0 10px;
-  line-height: 1.5;
-}
-
-.sMuted code,
 code {
-  background: var(--panel2);
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.05);
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 11.5px;
+  font-size: 11px;
 }
 
-/* Per-state notification rows */
+/* --- Generic row --- */
+.sRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 12px 14px;
+}
+
+.sRow + .sRow {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sRowText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sRowTitle {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.sRowHint {
+  font-size: 11px;
+  color: var(--label-2);
+}
+
+/* --- Value chips (port, stale) --- */
+.sChip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #0e0f12;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-chip);
+  padding: 7px 11px;
+}
+
+.sChipPre,
+.sChipSuf {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.sChipInput {
+  width: 52px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  -moz-appearance: textfield;
+}
+
+.sChipInput::-webkit-outer-spin-button,
+.sChipInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.sChipInputWide {
+  width: 30px;
+  text-align: right;
+}
+
+/* --- Toggle switch --- */
+.sToggle {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: #33363c;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  flex: none;
+  transition: background 0.15s ease;
+}
+
+.sToggle.on {
+  background: #d7dadf;
+}
+
+.sToggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sToggleKnob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #9398a0;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.sToggle.on .sToggleKnob {
+  transform: translateX(14px);
+  background: #15171b;
+}
+
+/* --- Notification state rows --- */
 .sStateRow {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 0;
-  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  padding: 12px 14px;
 }
 
-.sStateRow:first-of-type {
-  padding-top: 2px;
-}
-
-.sStateDot {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.sStateRow:not(.first) {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .sStateText {
-  display: flex;
-  flex-direction: column;
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .sStateTitle {
-  font-weight: 600;
-  font-size: 13px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
 }
 
 .sStateHint {
-  color: var(--muted);
   font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--label-2);
 }
 
 .sStateControls {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
 }
 
-.sToggle {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted);
+.sSoundBtn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  display: inline-flex;
+  color: var(--text-2);
   cursor: pointer;
 }
 
-.sToggle input {
-  cursor: pointer;
-}
-
-.sSelect {
-  background: var(--panel2);
+.sSoundBtn.on {
   color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 6px;
-  font-size: 12px;
 }
 
-.sSelect:disabled {
+.sSoundBtn:disabled {
   opacity: 0.4;
-}
-
-/* Checkboxes / fields */
-.sCheckRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  margin-top: 12px;
-  cursor: pointer;
-}
-
-.sField {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.sField label {
-  font-size: 13px;
-}
-
-.sInline {
-  display: flex;
-  gap: 8px;
-}
-
-.sNum {
-  width: 110px;
-  background: var(--panel2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Buttons */
-button {
-  background: var(--panel2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 7px 12px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-button:hover:not(:disabled) {
-  border-color: var(--accent);
-}
-
-button:disabled {
-  opacity: 0.45;
   cursor: default;
 }
 
-.sButtons {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin: 4px 0 8px;
-}
-
-/* Hook status badge */
-.sBadge {
-  margin-left: auto;
-  font-size: 10.5px;
-  letter-spacing: 0.03em;
-  padding: 2px 8px;
-  border-radius: 999px;
-  text-transform: none;
-}
-
-.sBadge.on {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.4);
-}
-
-.sBadge.off {
-  background: rgba(144, 146, 150, 0.12);
-  color: var(--muted);
-  border: 1px solid var(--border);
-}
-
-details {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.sBlock {
-  background: #0f1011;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px;
+.sSelect {
+  background: #0e0f12;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-family: var(--font-sans);
   font-size: 11px;
-  line-height: 1.45;
+}
+
+/* --- Idle checkbox row --- */
+.sCheckRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 0 2px;
+}
+
+/* --- Segmented control (theme) --- */
+.sSegment {
+  display: inline-flex;
+  background: #0e0f12;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-chip);
+  padding: 3px;
+  gap: 3px;
+}
+
+.sSeg {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 5px 13px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sSeg.on {
+  background: #2a2d33;
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* --- Hooks panel --- */
+.sHookStatus {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sHookLabel {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.sHookPath {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.sHookBtns {
+  display: flex;
+  gap: 9px;
+}
+
+.sBtn {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  padding: 6px 13px;
+  cursor: pointer;
+}
+
+.sBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.sBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sBtnDanger {
+  color: #cc8a8a;
+  border-color: rgba(204, 111, 118, 0.32);
+}
+
+.sHookNote {
+  font-size: 11px;
+  color: var(--label-2);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.sCode {
+  background: var(--bg);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--r-chip);
+  padding: 12px 13px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: #9ca2ac;
+  white-space: pre;
   overflow: auto;
   max-height: 200px;
-  color: #c1c2c5;
+  margin: 0;
 }
 
-/* Toast */
+/* --- Onboarding hero (first run) --- */
+.sOnboard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  background: #14161a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-window);
+  box-shadow: 0 30px 70px -20px rgba(0, 0, 0, 0.75);
+  padding: 40px 44px 34px;
+}
+
+.sOnboardGlyphs {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 26px;
+}
+
+.sOnboardTitle {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #f1f2f4;
+  margin: 0;
+}
+
+.sOnboardDesc {
+  font-size: 13.5px;
+  color: #9197a0;
+  line-height: 1.6;
+  max-width: 420px;
+  margin: 12px 0 0;
+}
+
+.sOnboardBtn {
+  margin-top: 26px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: #15171b;
+  background: #e9ebee;
+  border: none;
+  border-radius: 9px;
+  padding: 11px 22px;
+  cursor: pointer;
+}
+
+.sOnboardBtn:hover {
+  filter: brightness(1.04);
+}
+
+.sOnboardLink {
+  margin-top: 13px;
+  background: transparent;
+  border: none;
+  color: var(--text-2);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sOnboardLink:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sOnboardCode {
+  width: 100%;
+  margin-top: 22px;
+  text-align: left;
+}
+
+.sOnboardFoot {
+  font-size: 10.5px;
+  color: #5f646d;
+  margin: 18px 0 0;
+  line-height: 1.5;
+}
+
+/* --- Toast --- */
 .sToast {
   position: fixed;
-  left: 16px;
-  right: 16px;
-  bottom: 12px;
+  left: 22px;
+  right: 22px;
+  bottom: 14px;
   padding: 9px 12px;
-  border-radius: 8px;
+  border-radius: var(--r-chip);
   font-size: 12px;
   text-align: center;
 }

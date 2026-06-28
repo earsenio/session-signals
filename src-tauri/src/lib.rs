@@ -16,6 +16,7 @@ mod windows;
 use config::Config;
 use engine::{Engine, HookEvent, Rollup, SessionView, Transition};
 use notify::Notifier;
+use tray::TrayPalette;
 use serde::Serialize;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,9 @@ struct AppState {
     /// The currently-bound hook listener. Held so a port change can stop it
     /// (`unblock`) and swap in a new one.
     listener: Mutex<Option<Arc<Server>>>,
+    /// The active theme's tray palette, pushed from the webview. The tray icon is
+    /// drawn from this; persisted so the look survives restarts.
+    tray_palette: Mutex<TrayPalette>,
     notifier: Notifier,
     /// Hook events flow listener → this channel → the `beacon-events` worker.
     /// Keeping the listener thread off the engine/notify work means one
@@ -59,7 +63,10 @@ fn refresh(app: &AppHandle) {
             sessions: eng.snapshot(),
         }
     };
-    tray::set_rollup(app, payload.rollup);
+    {
+        let palette = *state.tray_palette.lock().expect("palette mutex poisoned");
+        tray::set_rollup(app, payload.rollup, &palette);
+    }
     let _ = app.emit("sessions-updated", payload);
 }
 
@@ -196,11 +203,29 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
 
     // 5. Persist + update live config.
     config::save(&app, &new)?;
+    // Broadcast the new config so every window reacts — notably the theme: the
+    // widget restyles even though the change was made in the settings window.
+    let _ = app.emit("config-updated", &new);
     *app.state::<AppState>()
         .config
         .lock()
         .expect("config mutex poisoned") = new;
     Ok(())
+}
+
+/// Receive the active theme's palette from the webview, persist it, and restyle
+/// the tray + notification icons. This is the *only* path appearance reaches the
+/// native side, so a new theme is pure frontend data — no Rust change, no assets.
+#[tauri::command]
+fn set_tray_palette(app: AppHandle, palette: TrayPalette) {
+    {
+        let state = app.state::<AppState>();
+        *state.tray_palette.lock().expect("palette mutex poisoned") = palette;
+    }
+    tray::save_palette(&app, &palette);
+    notify::render_icons(&app, &palette);
+    // Repaint the tray with the current rollup in the new palette.
+    refresh(&app);
 }
 
 #[tauri::command]
@@ -305,6 +330,8 @@ pub fn run() {
             )),
             config: Mutex::new(Config::default()),
             listener: Mutex::new(None),
+            // Classic until setup() loads the persisted palette.
+            tray_palette: Mutex::new(TrayPalette::default()),
             notifier: Notifier::new(),
             events: tx,
         })
@@ -312,6 +339,7 @@ pub fn run() {
             get_snapshot,
             get_config,
             set_config,
+            set_tray_palette,
             install_hooks,
             uninstall_hooks,
             hooks_installed,
@@ -341,6 +369,9 @@ pub fn run() {
 
             // Load persisted config and align runtime state with it.
             let cfg = config::load(&handle);
+            // Load the persisted tray palette (classic until the webview pushes
+            // the active theme) and render the matching notification icons.
+            let palette = tray::load_palette(&handle);
             {
                 let state = handle.state::<AppState>();
                 state
@@ -349,7 +380,9 @@ pub fn run() {
                     .expect("engine mutex poisoned")
                     .set_stale_timeout(Duration::from_secs(cfg.stale_timeout_min * 60));
                 *state.config.lock().expect("config mutex poisoned") = cfg.clone();
+                *state.tray_palette.lock().expect("palette mutex poisoned") = palette;
             }
+            notify::render_icons(&handle, &palette);
             // Keep the OS autostart entry in sync with the saved preference.
             let _ = set_autostart(&handle, cfg.launch_on_login);
 
@@ -357,8 +390,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Build the tray (starts grey).
-            tray::build(&handle)?;
+            // Build the tray (starts grey) using the persisted palette.
+            tray::build(&handle, &palette)?;
 
             // Create the floating widget (shown only if it was visible last run).
             windows::init(&handle)?;
@@ -372,6 +405,15 @@ pub fn run() {
                         let _ = w.hide();
                     }
                 });
+
+                // First-run / not-set-up flow: if Beacon's hooks aren't installed
+                // yet, Beacon can't detect anything — so surface the settings
+                // window (which shows the install banner) instead of sitting as a
+                // silent grey tray icon the user can't act on.
+                if !hooks::is_installed() {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
 
             // Start the localhost hook listener on the configured port.
