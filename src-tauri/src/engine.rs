@@ -6,7 +6,7 @@
 //! `lib.rs` owns it behind a `Mutex` and reacts to changes by refreshing the
 //! tray and emitting to the webview. The UI never derives state itself.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -135,8 +135,26 @@ pub struct SessionView {
     pub can_focus: bool,
 }
 
+/// A terminal handle remembered across a Beacon restart. Capture lives only in
+/// memory and only fires on `SessionStart` (see `capture.rs`), so a restart
+/// would otherwise lose click-to-focus for every already-running session until
+/// it happens to start a new turn. `lib.rs` persists these to the store and
+/// seeds them back in here at startup; they are a *side table* — they attach to
+/// a session only when a real hook event (re)creates its row, and never conjure
+/// a row on their own.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CapturedTerminal {
+    pub pid: Option<i32>,
+    pub app: Option<String>,
+    pub tty: Option<String>,
+}
+
 pub struct Engine {
     sessions: HashMap<String, Session>,
+    /// Remembered terminal handles keyed by `session_id`, rehydrated at startup.
+    /// Consulted when a session is (re)created so a restart keeps click-to-focus;
+    /// never iterated to build the session list (it cannot create rows).
+    pending_captures: HashMap<String, CapturedTerminal>,
     stale_timeout: Duration,
     /// Total silence before a session is removed from the list entirely. An
     /// idle session is visibly greyed ("No response") for the whole window
@@ -151,6 +169,7 @@ impl Engine {
     pub fn new(stale_timeout: Duration, drop_timeout: Duration) -> Self {
         Engine {
             sessions: HashMap::new(),
+            pending_captures: HashMap::new(),
             stale_timeout,
             drop_timeout,
         }
@@ -285,10 +304,15 @@ impl Engine {
                     transition: None,
                 }
             }
-            "SessionEnd" => ApplyOutcome {
-                changed: self.sessions.remove(&ev.session_id).is_some(),
-                transition: None,
-            },
+            "SessionEnd" => {
+                // The terminal is gone; forget its remembered handle too so a
+                // stale entry can't outlive the session in the persisted store.
+                self.pending_captures.remove(&ev.session_id);
+                ApplyOutcome {
+                    changed: self.sessions.remove(&ev.session_id).is_some(),
+                    transition: None,
+                }
+            }
             // Unknown / unhandled event: ignore.
             _ => ApplyOutcome {
                 changed: false,
@@ -302,6 +326,11 @@ impl Engine {
     /// so callers/notifications never fire on a same-state repeat.
     fn transition_to(&mut self, ev: &HookEvent, state: State) -> ApplyOutcome {
         let now = Instant::now();
+        // A terminal handle remembered across a restart (seeded at startup). It's
+        // attached only when this session's row is (re)created or is still
+        // missing a handle — so a Beacon restart keeps click-to-focus for
+        // already-running sessions, which never re-fire `SessionStart`.
+        let remembered = self.pending_captures.get(&ev.session_id).cloned();
         // `from`: Some(prev) on a real change, None on a same-state repeat.
         let (from, cwd, terminal_pid) = match self.sessions.entry(ev.session_id.clone()) {
             std::collections::hash_map::Entry::Occupied(mut o) => {
@@ -317,6 +346,14 @@ impl Engine {
                 if !ev.cwd.is_empty() {
                     s.cwd = ev.cwd.clone();
                 }
+                // Backfill a remembered handle if this row never resolved one.
+                if s.terminal_pid.is_none() {
+                    if let Some(cap) = &remembered {
+                        s.terminal_pid = cap.pid;
+                        s.terminal_app = cap.app.clone();
+                        s.terminal_tty = cap.tty.clone();
+                    }
+                }
                 (
                     if changed_state { Some(Some(prev)) } else { None },
                     s.cwd.clone(),
@@ -325,6 +362,8 @@ impl Engine {
             }
             std::collections::hash_map::Entry::Vacant(v) => {
                 let cwd = ev.cwd.clone();
+                let cap = remembered.unwrap_or_default();
+                let pid = cap.pid;
                 v.insert(Session {
                     cwd: cwd.clone(),
                     state,
@@ -333,11 +372,11 @@ impl Engine {
                     stale: false,
                     subagent_count: 0,
                     sub_since: None,
-                    terminal_pid: None,
-                    terminal_app: None,
-                    terminal_tty: None,
+                    terminal_pid: cap.pid,
+                    terminal_app: cap.app,
+                    terminal_tty: cap.tty,
                 });
-                (Some(None), cwd, None)
+                (Some(None), cwd, pid)
             }
         };
 
@@ -361,6 +400,16 @@ impl Engine {
         if let Some(s) = self.sessions.get_mut(id) {
             s.subagent_count = 0;
             s.sub_since = None;
+        }
+    }
+
+    /// Seed a remembered terminal handle at startup (from the persisted store).
+    /// It will be attached to the session the moment a real hook event recreates
+    /// its row — never on its own, so this can't conjure a phantom session.
+    /// Ignored if it carries no pid (nothing to focus).
+    pub fn seed_capture(&mut self, session_id: String, cap: CapturedTerminal) {
+        if cap.pid.is_some() {
+            self.pending_captures.insert(session_id, cap);
         }
     }
 
@@ -781,6 +830,47 @@ mod tests {
         e.apply(&ev("SessionStart", "a"));
         assert_eq!(e.terminal_pid("a"), None);
         assert!(!e.snapshot()[0].can_focus, "no pid ⇒ no focus affordance");
+    }
+
+    #[test]
+    fn seeded_capture_rehydrates_on_next_event_but_never_conjures_a_row() {
+        // Simulates a Beacon restart: a handle was persisted last run and seeded
+        // back in, but the session hasn't emitted anything yet.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.seed_capture(
+            "a".to_string(),
+            CapturedTerminal {
+                pid: Some(7777),
+                app: Some("Terminal".to_string()),
+                tty: Some("/dev/ttys003".to_string()),
+            },
+        );
+        // A seed alone must NOT create a session row (no phantom rows).
+        assert!(e.snapshot().is_empty(), "seeding alone creates no session");
+        assert_eq!(e.terminal_pid("a"), None);
+
+        // The first real event recreates the row AND picks up the handle, so
+        // click-to-focus is back without a fresh SessionStart.
+        e.apply(&ev("PostToolUse", "a"));
+        assert_eq!(e.terminal_pid("a"), Some(7777), "handle rehydrated on first event");
+        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        assert!(v.can_focus, "rehydrated handle restores the focus affordance");
+        assert_eq!(e.focus_target("a"), Some((7777, Some("/dev/ttys003".to_string()), Some("Terminal".to_string()))));
+    }
+
+    #[test]
+    fn session_end_forgets_seeded_capture() {
+        // A seeded handle must not outlive an explicit SessionEnd, so a later
+        // same-id session can't inherit a dead terminal's pid.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.seed_capture(
+            "a".to_string(),
+            CapturedTerminal { pid: Some(7777), app: None, tty: None },
+        );
+        e.apply(&ev("SessionEnd", "a"));
+        // Recreating the row now must NOT resurrect the forgotten handle.
+        e.apply(&ev("PostToolUse", "a"));
+        assert_eq!(e.terminal_pid("a"), None, "SessionEnd dropped the seed");
     }
 
     #[test]
