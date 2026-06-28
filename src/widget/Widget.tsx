@@ -111,8 +111,34 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
   const subLabel = `${session.subagent_count} ${
     session.subagent_count === 1 ? "agent" : "agents"
   } running`;
+
+  // Click-to-focus: only offered when Beacon resolved the owning terminal
+  // window (can_focus). A click raises it; if the window vanished since capture,
+  // focus_session returns false and we flash a brief "can't focus" hint rather
+  // than failing silently. Rows without a resolved window aren't clickable.
+  const [focusFailed, setFocusFailed] = useState(false);
+  const onFocus = useCallback(() => {
+    if (!session.can_focus) return;
+    invoke<boolean>("focus_session", { sessionId: session.session_id })
+      .then((ok) => {
+        if (!ok) {
+          setFocusFailed(true);
+          window.setTimeout(() => setFocusFailed(false), 1400);
+        }
+      })
+      .catch(() => {
+        setFocusFailed(true);
+        window.setTimeout(() => setFocusFailed(false), 1400);
+      });
+  }, [session.can_focus, session.session_id]);
+
   return (
-    <li className="wRow" style={{ opacity: session.stale ? 0.5 : 1 }}>
+    <li
+      className={`wRow${session.can_focus ? " wRowFocusable" : ""}`}
+      style={{ opacity: session.stale ? 0.5 : 1 }}
+      onClick={onFocus}
+      title={session.can_focus ? "Click to focus this session’s terminal" : undefined}
+    >
       <div className="wRowTop">
         <span className="wGlyphWrap">
           {/* Soft amber halo behind the glyph — always amber regardless of row
@@ -141,7 +167,13 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
             {stateText} <span className="wRowAge">· {formatAge(session.liveSeconds)}</span>
           </div>
         </div>
-        <span className="wChevron">›</span>
+        {focusFailed ? (
+          <span className="wRowFocusFail" title="That terminal window couldn’t be focused">
+            can’t focus
+          </span>
+        ) : (
+          session.can_focus && <span className="wChevron">›</span>
+        )}
       </div>
       {/* Quiet sub-line: pulsing dot + count + ticking elapsed. Rendered only
           while busy → no reserved height when the count is 0 (row reflows). */}

@@ -7,19 +7,33 @@
 //! tolerated — they never crash the listener.
 
 use crate::engine::HookEvent;
+use crate::token;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
+
+/// Shared, live-updatable auth token. Held as an `Arc<Mutex<String>>` so a
+/// "regenerate token" action can swap the secret in place — the running listener
+/// reads the current value on each request, no restart needed.
+pub type AuthToken = Arc<Mutex<String>>;
 
 /// Start the listener on `127.0.0.1:port`. Spawns its own thread and returns the
 /// `Arc<Server>` (or an error if the port is taken). Hold the handle to stop
 /// the listener later via [`Server::unblock`] — this is how a live port change
 /// tears down the old server before swapping in a new one.
 ///
-/// - `POST /hook`  → parse the hook JSON and invoke `on_event`.
+/// - `POST /hook`  → require a matching `X-Beacon-Token`, then parse the hook
+///   JSON and invoke `on_event`. A missing/wrong token is rejected with 401 and
+///   changes no state.
 /// - `GET  /state` → return `state_json()`; a loopback-only health/readback
-///   endpoint used to confirm the rollup without scraping the tray.
-pub fn start<F, G>(port: u16, on_event: F, state_json: G) -> std::io::Result<Arc<Server>>
+///   endpoint used to confirm the rollup without scraping the tray. Read-only
+///   and loopback-bound, so it isn't token-gated (it can't spoof state).
+pub fn start<F, G>(
+    port: u16,
+    auth: AuthToken,
+    on_event: F,
+    state_json: G,
+) -> std::io::Result<Arc<Server>>
 where
     F: Fn(HookEvent) + Send + 'static,
     G: Fn() -> String + Send + 'static,
@@ -37,7 +51,7 @@ where
             // `recv` unblocks (returns Err) when `unblock` is called on a swap.
             loop {
                 match worker.recv() {
-                    Ok(request) => handle(request, &on_event, &state_json),
+                    Ok(request) => handle(request, &auth, &on_event, &state_json),
                     Err(_) => break,
                 }
             }
@@ -46,7 +60,23 @@ where
     Ok(server)
 }
 
-fn handle<F, G>(mut request: Request, on_event: &F, state_json: &G)
+/// Does this request carry the expected `X-Beacon-Token`? Constant in spirit:
+/// we compare the full strings. A blank expected token (shouldn't happen) fails
+/// closed.
+fn token_ok(request: &Request, auth: &AuthToken) -> bool {
+    let expected = auth.lock().expect("auth token mutex poisoned").clone();
+    if expected.is_empty() {
+        return false;
+    }
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv(token::HEADER))
+        .map(|h| h.value.as_str() == expected)
+        .unwrap_or(false)
+}
+
+fn handle<F, G>(mut request: Request, auth: &AuthToken, on_event: &F, state_json: &G)
 where
     F: Fn(HookEvent),
     G: Fn() -> String,
@@ -65,6 +95,16 @@ where
 
     match (&method, url.as_str()) {
         (Method::Post, "/hook") => {
+            // Token gate: a missing/wrong token is rejected and alters nothing.
+            // We must still drain the body so the client's write completes.
+            if !token_ok(&request, auth) {
+                let mut sink = String::new();
+                let _ = request.as_reader().read_to_string(&mut sink);
+                let _ = request.respond(
+                    Response::from_string("{\"error\":\"unauthorized\"}").with_status_code(401),
+                );
+                return;
+            }
             // Read the body (small JSON) before responding.
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
@@ -120,10 +160,22 @@ mod tests {
         }
     }
 
-    fn post_hook(port: u16, body: &str) {
+    const TEST_TOKEN: &str = "test-token-abc123";
+
+    fn auth(tok: &str) -> AuthToken {
+        std::sync::Arc::new(Mutex::new(tok.to_string()))
+    }
+
+    /// POST a hook body with an explicit token header value (pass "" to omit).
+    fn post_hook_with_token(port: u16, body: &str, tok: &str) {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let token_header = if tok.is_empty() {
+            String::new()
+        } else {
+            format!("{}: {}\r\n", token::HEADER, tok)
+        };
         let req = format!(
-            "POST /hook HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST /hook HTTP/1.1\r\nHost: 127.0.0.1\r\n{token_header}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -131,6 +183,10 @@ mod tests {
         stream.flush().ok();
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).ok(); // drain so the server finishes the response
+    }
+
+    fn post_hook(port: u16, body: &str) {
+        post_hook_with_token(port, body, TEST_TOKEN);
     }
 
     /// The mechanism behind a live port change: a port in use rejects a second
@@ -142,6 +198,7 @@ mod tests {
         let c = count.clone();
         let server = start(
             0,
+            auth(TEST_TOKEN),
             move |_ev| {
                 c.fetch_add(1, Ordering::SeqCst);
             },
@@ -156,14 +213,59 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1, "callback should have run once");
 
         // Binding the same port again is refused while it's in use.
-        let busy = start(port, |_e| {}, || "{}".to_string());
+        let busy = start(port, auth(TEST_TOKEN), |_e| {}, || "{}".to_string());
         assert!(busy.is_err(), "second bind on a live port must be busy");
 
         // Stop and release the port, then rebinding it succeeds.
         server.unblock();
         drop(server);
         std::thread::sleep(Duration::from_millis(150));
-        let rebound = start(port, |_e| {}, || "{}".to_string());
+        let rebound = start(port, auth(TEST_TOKEN), |_e| {}, || "{}".to_string());
         assert!(rebound.is_ok(), "rebind after release should succeed: {:?}", rebound.err());
+    }
+
+    /// A request with a missing or wrong token must be rejected and reach the
+    /// callback zero times (it alters no state). The right token still works,
+    /// and rotating the shared token in place takes effect with no restart.
+    #[test]
+    fn token_gate_rejects_then_accepts() {
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        let tok = auth(TEST_TOKEN);
+        let server = start(
+            0,
+            tok.clone(),
+            move |_ev| {
+                c.fetch_add(1, Ordering::SeqCst);
+            },
+            || "{}".to_string(),
+        )
+        .expect("bind ok");
+        let port = bound_port(&server);
+        let body = r#"{"hook_event_name":"SessionStart","session_id":"x"}"#;
+
+        // No token → rejected, callback never runs.
+        post_hook_with_token(port, body, "");
+        // Wrong token → rejected too.
+        post_hook_with_token(port, body, "nope");
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(count.load(Ordering::SeqCst), 0, "bad token must alter nothing");
+
+        // Correct token → accepted.
+        post_hook_with_token(port, body, TEST_TOKEN);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(count.load(Ordering::SeqCst), 1, "valid token is accepted");
+
+        // Rotate the live token; the old one now fails and the new one works —
+        // no listener restart involved.
+        *tok.lock().unwrap() = "rotated-token".to_string();
+        post_hook_with_token(port, body, TEST_TOKEN);
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(count.load(Ordering::SeqCst), 1, "old token rejected after rotate");
+        post_hook_with_token(port, body, "rotated-token");
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(count.load(Ordering::SeqCst), 2, "new token accepted after rotate");
+
+        server.unblock();
     }
 }

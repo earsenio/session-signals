@@ -243,6 +243,25 @@ body {
   flex: none;
 }
 
+/* Click-to-focus: only rows whose terminal window resolved are interactive. */
+.wRowFocusable {
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+}
+
+.wRowFocusable:hover {
+  background: var(--hairline-faint);
+}
+
+/* Brief, quiet hint when a focus attempt finds no live window. */
+.wRowFocusFail {
+  font: 500 10.5px var(--font-mono);
+  color: var(--muted);
+  flex: none;
+  white-space: nowrap;
+}
+
 /* --- Empty state --- */
 .wEmpty {
   flex: 1;

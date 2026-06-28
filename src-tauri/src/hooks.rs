@@ -54,14 +54,17 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// One hook group for a single event: an empty matcher with our http hook.
-fn our_group(port: u16) -> Value {
+/// One hook group for a single event: an empty matcher with our http hook,
+/// carrying the auth token as a header so the listener can tell our hooks apart
+/// from any other local process posting to the port.
+fn our_group(port: u16, token: &str) -> Value {
     json!({
         "matcher": "",
         "hooks": [
             {
                 "type": "http",
                 "url": endpoint(port),
+                "headers": { crate::token::HEADER: token },
                 // Generous timeout; our listener answers instantly anyway.
                 "timeout": 10
             }
@@ -71,31 +74,56 @@ fn our_group(port: u16) -> Value {
 
 /// The full `{ "hooks": { ... } }` block Beacon installs — used both for the
 /// copy-paste fallback and as the source of truth for the merge.
-pub fn hook_block_value(port: u16) -> Value {
+pub fn hook_block_value(port: u16, token: &str) -> Value {
     let mut hooks = Map::new();
     for ev in EVENTS {
-        hooks.insert(ev.to_string(), Value::Array(vec![our_group(port)]));
+        hooks.insert(ev.to_string(), Value::Array(vec![our_group(port, token)]));
     }
     json!({ "hooks": hooks })
 }
 
 /// Pretty-printed copy-paste string of the hook block.
-pub fn hook_block_string(port: u16) -> String {
-    serde_json::to_string_pretty(&hook_block_value(port))
+pub fn hook_block_string(port: u16, token: &str) -> String {
+    serde_json::to_string_pretty(&hook_block_value(port, token))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Is this individual hook object one of Beacon's? (http hook → loopback /hook)
+/// Is this individual hook object one of Beacon's? We recognize two shapes
+/// structurally (no marker written into the user's file):
+/// - an `http` hook posting to our loopback `/hook` endpoint, and
+/// - the `command` capture hook, whose command contains the `beacon-capture`
+///   marker (see `capture.rs`).
 fn is_our_hook(hook: &Value) -> bool {
-    if hook.get("type").and_then(Value::as_str) != Some("http") {
-        return false;
+    match hook.get("type").and_then(Value::as_str) {
+        Some("http") => match hook.get("url").and_then(Value::as_str) {
+            Some(url) => {
+                url.ends_with("/hook") && (url.contains("127.0.0.1") || url.contains("localhost"))
+            }
+            None => false,
+        },
+        Some("command") => hook
+            .get("command")
+            .and_then(Value::as_str)
+            .map(|c| c.contains(crate::capture::MARKER))
+            .unwrap_or(false),
+        _ => false,
     }
-    match hook.get("url").and_then(Value::as_str) {
-        Some(url) => {
-            url.ends_with("/hook") && (url.contains("127.0.0.1") || url.contains("localhost"))
-        }
-        None => false,
-    }
+}
+
+/// The capture command hook group for `SessionStart` (Feature 2). `matcher` is
+/// empty like our http groups; a slightly longer timeout covers the process-tree
+/// walk + the loopback POST.
+fn capture_group(command: &str) -> Value {
+    json!({
+        "matcher": "",
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "timeout": 5
+            }
+        ]
+    })
 }
 
 /// Strip Beacon's hooks out of one event's array of groups, in place. Drops a
@@ -180,9 +208,60 @@ pub fn is_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// Do Beacon's installed http hooks carry an auth-token header that doesn't match
+/// `token` (missing, or a stale value)? When true, the token-enforcing listener
+/// 401s every one of these hooks and silently tracks nothing — exactly the
+/// breakage an upgrade to a token build causes when it leaves pre-token hooks in
+/// place. Used at startup to decide whether to auto-repair.
+///
+/// Only our `http` hooks are checked: the capture `command` hook (also ours)
+/// intentionally carries no header. Returns false when Beacon has no http hooks
+/// installed (the not-installed case is handled by the first-run flow) or when
+/// every one already matches.
+pub fn needs_token_repair(token: &str) -> bool {
+    let path = match settings_path() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let settings = match load_settings(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let hooks = match settings.get("hooks").and_then(Value::as_object) {
+        Some(h) => h,
+        None => return false,
+    };
+    for groups in hooks.values() {
+        let groups = match groups.as_array() {
+            Some(g) => g,
+            None => continue,
+        };
+        for g in groups {
+            let hs = match g.get("hooks").and_then(Value::as_array) {
+                Some(h) => h,
+                None => continue,
+            };
+            for h in hs {
+                // Only our http hooks carry the token header.
+                if h.get("type").and_then(Value::as_str) == Some("http") && is_our_hook(h) {
+                    let current = h
+                        .get("headers")
+                        .and_then(Value::as_object)
+                        .and_then(|hdrs| hdrs.get(crate::token::HEADER))
+                        .and_then(Value::as_str);
+                    if current != Some(token) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Merge Beacon's hooks into settings.json. Idempotent: any prior Beacon hooks
 /// are removed first, then our fresh block is added. Other hooks untouched.
-pub fn install(port: u16) -> Result<PathBuf, String> {
+pub fn install(port: u16, token: &str, capture_cmd: Option<&str>) -> Result<PathBuf, String> {
     let path = settings_path()?;
     let mut settings = load_settings(&path)?;
 
@@ -200,9 +279,17 @@ pub fn install(port: u16) -> Result<PathBuf, String> {
         let groups = arr
             .as_array_mut()
             .ok_or_else(|| format!("settings.json hooks.{ev} is not an array"))?;
-        // Remove any stale Beacon entries, then add the current one.
+        // Remove any stale Beacon entries (http *and* the capture command), then
+        // add the current ones.
         strip_our_hooks(groups);
-        groups.push(our_group(port));
+        groups.push(our_group(port, token));
+        // The terminal-capture command hook rides alongside the http hook on
+        // SessionStart only (that's when we resolve the owning terminal).
+        if ev == &"SessionStart" {
+            if let Some(cmd) = capture_cmd {
+                groups.push(capture_group(cmd));
+            }
+        }
     }
 
     write_settings(&path, &settings)?;
@@ -261,7 +348,7 @@ mod tests {
                 .or_insert_with(|| Value::Array(vec![]));
             let groups = arr.as_array_mut().unwrap();
             strip_our_hooks(groups);
-            groups.push(our_group(4317));
+            groups.push(our_group(4317, "tok"));
         }
 
         // The user's command hook on Stop survives alongside ours.
@@ -269,6 +356,9 @@ mod tests {
         assert_eq!(stop.len(), 2);
         assert!(stop.iter().any(|g| g["hooks"][0]["type"] == "command"));
         assert!(stop.iter().any(|g| is_our_hook(&g["hooks"][0])));
+        // Our hook carries the auth-token header.
+        let ours = stop.iter().find(|g| is_our_hook(&g["hooks"][0])).unwrap();
+        assert_eq!(ours["hooks"][0]["headers"][crate::token::HEADER], "tok");
 
         // Now uninstall: strip ours from every event.
         let hooks = settings.get_mut("hooks").unwrap().as_object_mut().unwrap();
@@ -292,11 +382,57 @@ mod tests {
     }
 
     #[test]
+    fn token_repair_detects_missing_and_mismatched_headers() {
+        // A pre-token Beacon http hook (no headers) — the exact stale shape an
+        // upgrade leaves behind.
+        let stale: Value = serde_json::from_str(
+            r#"{ "type": "http", "url": "http://127.0.0.1:4317/hook", "timeout": 10 }"#,
+        )
+        .unwrap();
+        assert!(is_our_hook(&stale));
+        // No header at all → mismatch against any token.
+        assert!(needs_repair_for(&stale, "tok"));
+
+        // Wrong token value → mismatch.
+        let wrong = our_group(4317, "old-token");
+        let wrong_hook = &wrong["hooks"][0];
+        assert!(needs_repair_for(wrong_hook, "new-token"));
+
+        // Correct token → no repair.
+        let good = our_group(4317, "tok");
+        let good_hook = &good["hooks"][0];
+        assert!(!needs_repair_for(good_hook, "tok"));
+
+        // A foreign hook is never ours, so never triggers repair.
+        let foreign: Value =
+            serde_json::from_str(r#"{ "type": "command", "command": "echo hi" }"#).unwrap();
+        assert!(!needs_repair_for(&foreign, "tok"));
+    }
+
+    /// Mirror of `needs_token_repair`'s per-hook check, for unit-testing single
+    /// hook objects without writing a settings.json. (The public function walks a
+    /// real file; this isolates the matching logic.)
+    fn needs_repair_for(hook: &Value, token: &str) -> bool {
+        if hook.get("type").and_then(Value::as_str) == Some("http") && is_our_hook(hook) {
+            let current = hook
+                .get("headers")
+                .and_then(Value::as_object)
+                .and_then(|h| h.get(crate::token::HEADER))
+                .and_then(Value::as_str);
+            return current != Some(token);
+        }
+        false
+    }
+
+    #[test]
     fn block_string_has_all_events() {
-        let s = hook_block_string(4317);
+        let s = hook_block_string(4317, "secret-tok");
         for ev in EVENTS {
             assert!(s.contains(ev), "missing {ev}");
         }
         assert!(s.contains("127.0.0.1:4317/hook"));
+        // The copy-paste fallback carries the token too.
+        assert!(s.contains("secret-tok"));
+        assert!(s.contains(crate::token::HEADER));
     }
 }

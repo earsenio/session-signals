@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the generated Info.plist by Tauri's macOS bundler. -->
+<plist version="1.0">
+<dict>
+  <!-- Click-to-focus (Feature 2) raises a session's terminal window via System
+       Events. macOS shows this string in the one-time Automation permission
+       prompt. Without it the prompt is rejected outright and focus can't work. -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Beacon uses Automation to bring the terminal window of the Claude Code session you click to the front.</string>
+</dict>
+</plist>

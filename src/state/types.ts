@@ -15,6 +15,9 @@ export interface SessionView {
   subagent_count: number;
   /// Seconds since the subagent count rose from 0 (0 when none are running).
   subagent_seconds: number;
+  /// Whether Beacon resolved the owning terminal window — gates the row's
+  /// click-to-focus affordance.
+  can_focus: boolean;
 }
 
 export interface SessionsPayload {
