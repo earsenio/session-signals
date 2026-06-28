@@ -135,6 +135,9 @@ cc-beacon/
   so the UI stays a thin renderer.
 - No browser storage APIs. Persist via `tauri-plugin-store` (JSON in app config
   dir): settings, window position, theme.
+- Versioning: SemVer, releases-only. `package.json` is the single source of
+  truth; bump via `npm run release:{patch,minor,major}`. Never hand-edit the
+  version in `tauri.conf.json` / `Cargo.toml`. See `docs/VERSIONING.md`.
 
 ## Guardrails
 

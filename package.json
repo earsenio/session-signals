@@ -7,7 +7,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version": "node scripts/sync-version.mjs && cargo update --manifest-path src-tauri/Cargo.toml -p cc-beacon --quiet && git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock",
+    "postversion": "git push --follow-tags",
+    "release:patch": "npm version patch",
+    "release:minor": "npm version minor",
+    "release:major": "npm version major"
   },
   "dependencies": {
     "@fontsource/geist-mono": "^5.2.8",

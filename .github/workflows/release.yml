@@ -1,0 +1,69 @@
+name: Release
+
+# Build the macOS + Windows bundles and attach them to a GitHub Release whenever
+# a vX.Y.Z tag is pushed. Tags are created by `npm run release:*` (see
+# package.json / docs/VERSIONING.md), which also pushes the tag — that push is
+# what triggers this workflow.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    permissions:
+      contents: write # create the Release and upload assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Universal binary covers both Apple Silicon and Intel Macs.
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS builds the universal binary, so it needs both arch targets.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Code signing (add as repo secrets to ship without OS warnings) ---
+          # macOS notarization + signing:
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Authenticode signing is configured via tauri.conf.json
+          # bundle.windows.certificateThumbprint (+ a cert on the runner).
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Beacon ${{ github.ref_name }}"
+          releaseBody: "Download the installer for your platform below."
+          # Draft so a human reviews the assets before publishing.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

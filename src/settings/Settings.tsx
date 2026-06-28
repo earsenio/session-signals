@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_CONFIG, SOUNDS, type Config, type StateNotify } from "../state/config";
 import { useTheme } from "../themes/useTheme";
 import { THEME_LIST, type ThemePalette } from "../themes";
@@ -23,6 +24,7 @@ export default function Settings() {
   const [endpoint, setEndpoint] = useState("");
   const [hookBlock, setHookBlock] = useState("");
   const [status, setStatus] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
+  const [appVersion, setAppVersion] = useState("");
   const flashTimer = useRef<number | undefined>(undefined);
 
   const flash = useCallback((msg: string, kind: "ok" | "err") => {
@@ -46,6 +48,9 @@ export default function Settings() {
       })
       .catch(() => {});
     refreshHooks();
+    // Read the running app version straight from Tauri so it always reflects the
+    // built bundle — never hardcoded (single source of truth is package.json).
+    getVersion().then(setAppVersion).catch(() => {});
   }, [refreshHooks]);
 
   // Persist a full config and reflect backend errors.
@@ -304,6 +309,10 @@ export default function Settings() {
           <pre className="sCode">{hookBlock}</pre>
         </div>
       </Section>
+
+      <footer className="sFooter">
+        <span className="sVersion">Beacon{appVersion ? ` v${appVersion}` : ""}</span>
+      </footer>
 
       {status && <div className={`sToast ${status.kind}`}>{status.msg}</div>}
     </main>
