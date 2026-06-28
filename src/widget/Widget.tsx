@@ -54,17 +54,34 @@ function useEngineState() {
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
-    invoke<SessionsPayload>("get_snapshot")
-      .then((p) => {
-        setPayload(p);
-        setBaseAt(Date.now());
-      })
-      .catch(() => {});
-    const unlisten = listen<SessionsPayload>("sessions-updated", (e) => {
-      setPayload(e.payload);
+    let active = true;
+    const apply = (p: SessionsPayload) => {
+      if (!active) return;
+      setPayload(p);
       setBaseAt(Date.now());
-    });
+    };
+    const sync = () => {
+      invoke<SessionsPayload>("get_snapshot").then(apply).catch(() => {});
+    };
+
+    // Low-latency path: apply every engine push the instant it arrives.
+    const unlisten = listen<SessionsPayload>("sessions-updated", (e) => apply(e.payload));
+
+    // Self-heal: the Rust engine is the source of truth, so also reconcile
+    // against it on a slow interval and whenever the widget regains focus. This
+    // guarantees the view can never get *stuck* on a stale snapshot if a
+    // `sessions-updated` event is ever missed — e.g. one emitted during the
+    // listener's async registration window, or coalesced/dropped while the
+    // webview was backgrounded. (`seconds_in_state` from the snapshot is
+    // authoritative, so resetting `baseAt` on each reconcile keeps ages exact.)
+    sync();
+    const poll = setInterval(sync, 2000);
+    window.addEventListener("focus", sync);
+
     return () => {
+      active = false;
+      clearInterval(poll);
+      window.removeEventListener("focus", sync);
       unlisten.then((un) => un());
     };
   }, []);
