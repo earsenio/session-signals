@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -393,14 +394,17 @@ export default function Widget() {
   // Collapsed: nothing but the draggable, click-to-expand pill.
   if (compact) {
     return (
-      <div className="widget widgetCompact" style={{ opacity }}>
+      <div
+        className="widget widgetCompact"
+        style={{ "--widget-opacity": opacity } as CSSProperties}
+      >
         <CompactPill sessions={sessions} palette={palette} onExpand={toggleCompact} />
       </div>
     );
   }
 
   return (
-    <div className="widget" style={{ opacity }}>
+    <div className="widget" style={{ "--widget-opacity": opacity } as CSSProperties}>
       <header className="wHeader" data-tauri-drag-region>
         <span className="wHeaderGlyph" data-tauri-drag-region>
           <StateGlyph

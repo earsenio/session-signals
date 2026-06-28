@@ -16,18 +16,34 @@ body {
 }
 
 .widget {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
   color: var(--text);
-  background: var(--widget-bg);
-  border: 1px solid var(--widget-border);
   border-radius: var(--r-card);
   overflow: hidden;
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
   box-shadow: var(--shadow-float);
   user-select: none;
+}
+
+/* The panel background is a single flat translucent layer behind the content —
+   NO `backdrop-filter`. That blur was the blink: WKWebView re-composites a
+   backdrop-filter layer on every repaint, and the per-second timers repaint
+   constantly, so the blurred backdrop flashed to fully opaque each tick. A flat
+   tint can't flicker. (`--widget-bg` is already semi-transparent, so the panel
+   stays translucent without the blur.) The layer carries the user's opacity and
+   sits below the crisp content; box-shadow stays on .widget so overflow:hidden
+   doesn't crop the float shadow. */
+.widget::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--widget-bg);
+  border: 1px solid var(--widget-border);
+  opacity: var(--widget-opacity, 0.95);
+  z-index: -1;
 }
 
 /* --- Header (drag handle) --- */
