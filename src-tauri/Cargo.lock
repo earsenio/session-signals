@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "cc-beacon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "png 0.17.16",
  "serde",
