@@ -25,7 +25,6 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tiny_http::Server;
 use windows::WidgetPrefs;
 
-const GRACE_SECS: u64 = 30;
 /// How often the background sweep checks for stale sessions.
 const SWEEP_INTERVAL_SECS: u64 = 15;
 
@@ -192,13 +191,12 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
         }
     }
 
-    // 4. Stale timeout.
-    if new.stale_timeout_min != old.stale_timeout_min {
-        app.state::<AppState>()
-            .engine
-            .lock()
-            .expect("engine mutex poisoned")
-            .set_stale_timeout(Duration::from_secs(new.stale_timeout_min * 60));
+    // 4. Stale timeout + idle-drop window.
+    if new.stale_timeout_min != old.stale_timeout_min || new.idle_drop_min != old.idle_drop_min {
+        let state = app.state::<AppState>();
+        let mut eng = state.engine.lock().expect("engine mutex poisoned");
+        eng.set_stale_timeout(Duration::from_secs(new.stale_timeout_min * 60));
+        eng.set_drop_timeout(Duration::from_secs(new.idle_drop_min * 60));
     }
 
     // 5. Persist + update live config.
@@ -331,7 +329,7 @@ pub fn run() {
             // applies the real stale timeout before the listener starts.
             engine: Mutex::new(Engine::new(
                 Duration::from_secs(config::DEFAULT_STALE_MIN * 60),
-                Duration::from_secs(GRACE_SECS),
+                Duration::from_secs(config::DEFAULT_IDLE_DROP_MIN * 60),
             )),
             config: Mutex::new(Config::default()),
             listener: Mutex::new(None),
@@ -380,11 +378,10 @@ pub fn run() {
             let palette = tray::load_palette(&handle);
             {
                 let state = handle.state::<AppState>();
-                state
-                    .engine
-                    .lock()
-                    .expect("engine mutex poisoned")
-                    .set_stale_timeout(Duration::from_secs(cfg.stale_timeout_min * 60));
+                let mut eng = state.engine.lock().expect("engine mutex poisoned");
+                eng.set_stale_timeout(Duration::from_secs(cfg.stale_timeout_min * 60));
+                eng.set_drop_timeout(Duration::from_secs(cfg.idle_drop_min * 60));
+                drop(eng);
                 *state.config.lock().expect("config mutex poisoned") = cfg.clone();
                 *state.tray_palette.lock().expect("palette mutex poisoned") = palette;
             }

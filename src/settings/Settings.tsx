@@ -207,7 +207,35 @@ export default function Settings() {
                 value={cfg.stale_timeout_min}
                 onChange={(e) => {
                   const v = parseInt(e.target.value, 10);
-                  if (Number.isFinite(v) && v >= 1) patch({ stale_timeout_min: v });
+                  if (Number.isFinite(v) && v >= 1)
+                    // Drop window can't precede greying — carry it up with stale.
+                    patch({
+                      stale_timeout_min: v,
+                      idle_drop_min: Math.max(cfg.idle_drop_min, v),
+                    });
+                }}
+              />
+              <span className="sChipSuf">min</span>
+            </div>
+          </div>
+
+          <div className="sRow">
+            <div className="sRowText">
+              <span className="sRowTitle">Remove idle session</span>
+              <span className="sRowHint">Keep greyed, then drop after</span>
+            </div>
+            <div className="sChip">
+              <input
+                className="sChipInput sChipInputWide"
+                type="number"
+                min={cfg.stale_timeout_min}
+                max={1440}
+                value={cfg.idle_drop_min}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  // Can't drop before it's greyed: floor at the stale timeout.
+                  if (Number.isFinite(v) && v >= 1)
+                    patch({ idle_drop_min: Math.max(v, cfg.stale_timeout_min) });
                 }}
               />
               <span className="sChipSuf">min</span>

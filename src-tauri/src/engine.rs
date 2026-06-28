@@ -100,16 +100,21 @@ pub struct SessionView {
 pub struct Engine {
     sessions: HashMap<String, Session>,
     stale_timeout: Duration,
-    /// Grace period after going stale before the session is dropped entirely.
-    grace: Duration,
+    /// Total silence before a session is removed from the list entirely. An
+    /// idle session is visibly greyed ("No response") for the whole window
+    /// between `stale_timeout` and this; only then is it dropped. Removal is
+    /// otherwise driven by an explicit `SessionEnd`. Kept long (config default
+    /// 60 min) so an idle session persists rather than blinking out, while a
+    /// terminal killed without firing `SessionEnd` still eventually self-clears.
+    drop_timeout: Duration,
 }
 
 impl Engine {
-    pub fn new(stale_timeout: Duration, grace: Duration) -> Self {
+    pub fn new(stale_timeout: Duration, drop_timeout: Duration) -> Self {
         Engine {
             sessions: HashMap::new(),
             stale_timeout,
-            grace,
+            drop_timeout,
         }
     }
 
@@ -239,6 +244,12 @@ impl Engine {
         self.stale_timeout = timeout;
     }
 
+    /// Update the idle-drop window at runtime (settings change). Existing
+    /// sessions are re-evaluated on the next sweep.
+    pub fn set_drop_timeout(&mut self, timeout: Duration) {
+        self.drop_timeout = timeout;
+    }
+
     /// Mark sessions stale past the timeout and drop them past the grace
     /// window. Reports whether anything changed and which sessions newly went
     /// stale (so the caller can optionally notify on idle).
@@ -247,9 +258,11 @@ impl Engine {
         let mut changed = false;
         let mut went_stale = Vec::new();
 
-        // Drop sessions that have been silent past timeout + grace.
+        // Drop sessions silent past the whole idle-drop window. Until then a
+        // stale session stays in the list (greyed) — it is not removed just for
+        // crossing the stale timeout.
         let before = self.sessions.len();
-        let drop_after = self.stale_timeout + self.grace;
+        let drop_after = self.drop_timeout;
         self.sessions
             .retain(|_, s| now.duration_since(s.last_seen) < drop_after);
         if self.sessions.len() != before {
@@ -399,7 +412,7 @@ mod tests {
 
     #[test]
     fn lifecycle_transitions() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.apply(&ev("SessionStart", "a"));
         assert_eq!(e.rollup(), Rollup::Green);
         e.apply(&ev("UserPromptSubmit", "a"));
@@ -414,7 +427,7 @@ mod tests {
 
     #[test]
     fn rollup_priority_across_sessions() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.apply(&ev("UserPromptSubmit", "a")); // working
         e.apply(&notif("b", "permission_prompt")); // needs you
         // One Working + one Needs-you → Red.
@@ -425,7 +438,7 @@ mod tests {
 
     #[test]
     fn ignored_notifications_do_not_change_state() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.apply(&ev("UserPromptSubmit", "a"));
         assert_eq!(e.rollup(), Rollup::Orange);
         e.apply(&notif("a", "auth_success"));
@@ -434,7 +447,7 @@ mod tests {
 
     #[test]
     fn transition_reported_once_then_suppressed() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         // New session entering Working: transition from None.
         let out = e.apply(&ev("UserPromptSubmit", "a"));
         let t = out.transition.expect("first transition");
@@ -454,7 +467,7 @@ mod tests {
 
     #[test]
     fn idle_prompt_does_not_turn_red() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         // A finished turn is Ready/green.
         e.apply(&ev("SessionStart", "a"));
         assert_eq!(e.rollup(), Rollup::Green);
@@ -474,7 +487,7 @@ mod tests {
 
     #[test]
     fn heartbeat_keeps_state() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.apply(&ev("UserPromptSubmit", "a"));
         e.apply(&ev("PostToolUse", "a"));
         assert_eq!(e.rollup(), Rollup::Orange);
@@ -482,7 +495,7 @@ mod tests {
 
     #[test]
     fn compaction_shows_working_then_ready() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         // A finished turn is Ready/green.
         e.apply(&ev("SessionStart", "a"));
         assert_eq!(e.rollup(), Rollup::Green);
@@ -496,7 +509,7 @@ mod tests {
 
     #[test]
     fn pretooluse_starts_working() {
-        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(30));
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         // A session first seen via a tool call is Working, even if we never
         // observed its UserPromptSubmit.
         let out = e.apply(&ev("PreToolUse", "a"));
@@ -524,5 +537,19 @@ mod tests {
         e2.apply(&ev("SessionStart", "a"));
         e2.sweep();
         assert_eq!(e2.snapshot().len(), 0);
+    }
+
+    #[test]
+    fn idle_session_persists_until_drop_window() {
+        // Stale immediately, but a long drop window: an idle session must stay
+        // in the list (greyed) across repeated sweeps rather than blink out.
+        let mut e = Engine::new(Duration::from_millis(0), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "a"));
+        for _ in 0..3 {
+            e.sweep();
+        }
+        assert_eq!(e.snapshot().len(), 1, "stale session stays visible");
+        assert!(e.snapshot()[0].stale, "and is marked stale (grey)");
+        assert_eq!(e.rollup(), Rollup::Grey);
     }
 }

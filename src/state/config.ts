@@ -12,6 +12,9 @@ export interface Config {
   version: number;
   port: number;
   stale_timeout_min: number;
+  /// Minutes of total silence before an idle session is removed from the list.
+  /// Until then it stays visible, greyed. Always >= stale_timeout_min.
+  idle_drop_min: number;
   launch_on_login: boolean;
   notify_idle: boolean;
   /// Active theme id (see src/themes). Unknown ids fall back to the default.
@@ -28,6 +31,7 @@ export const DEFAULT_CONFIG: Config = {
   version: 1,
   port: 4317,
   stale_timeout_min: 10,
+  idle_drop_min: 60,
   launch_on_login: false,
   notify_idle: false,
   theme: "classic",

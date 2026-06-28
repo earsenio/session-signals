@@ -18,6 +18,11 @@ pub const CURRENT_VERSION: u32 = 1;
 
 pub const DEFAULT_PORT: u16 = 4317;
 pub const DEFAULT_STALE_MIN: u64 = 10;
+/// Total silence before an idle session is removed from the list. It stays
+/// visibly greyed from `DEFAULT_STALE_MIN` until this — long enough to persist
+/// rather than blink out, short enough to eventually clear a dead session whose
+/// terminal never fired `SessionEnd`.
+pub const DEFAULT_IDLE_DROP_MIN: u64 = 60;
 
 /// Built-in notification sounds (macOS system sound names under
 /// `/System/Library/Sounds`). The settings UI offers this set.
@@ -54,6 +59,10 @@ pub struct Config {
     pub version: u32,
     pub port: u16,
     pub stale_timeout_min: u64,
+    /// Minutes of total silence before an idle session is removed from the list
+    /// entirely. Until then it stays visible, greyed ("No response"). Always
+    /// `>= stale_timeout_min` (normalized in `sanitized`).
+    pub idle_drop_min: u64,
     pub launch_on_login: bool,
     /// Notify when a session goes idle/stale. Off by default (spec: never notify
     /// on stale-drop unless enabled).
@@ -73,6 +82,7 @@ impl Default for Config {
             version: CURRENT_VERSION,
             port: DEFAULT_PORT,
             stale_timeout_min: DEFAULT_STALE_MIN,
+            idle_drop_min: DEFAULT_IDLE_DROP_MIN,
             launch_on_login: false,
             notify_idle: false,
             theme: "classic".to_string(),
@@ -94,6 +104,11 @@ impl Config {
         }
         if self.stale_timeout_min == 0 {
             self.stale_timeout_min = DEFAULT_STALE_MIN;
+        }
+        // An idle session must be greyed before it's dropped, so the drop window
+        // can never be shorter than the stale timeout.
+        if self.idle_drop_min < self.stale_timeout_min {
+            self.idle_drop_min = self.stale_timeout_min;
         }
         if self.theme.trim().is_empty() {
             self.theme = "classic".to_string();
