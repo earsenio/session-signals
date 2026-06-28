@@ -23,8 +23,9 @@ const KEY_POS: &str = "widget.position";
 const KEY_VISIBLE: &str = "widget.visible";
 const KEY_COMPACT: &str = "widget.compact";
 const KEY_OPACITY: &str = "widget.opacity";
-/// The expanded height to restore to when un-minifying. Captured the moment the
+/// The expanded size to restore to when un-minifying. Captured the moment the
 /// user collapses, so "original size" means whatever they last had open.
+const KEY_EXPANDED_W: &str = "widget.expandedWidth";
 const KEY_EXPANDED_H: &str = "widget.expandedHeight";
 
 const DEFAULT_W: f64 = 320.0;
@@ -33,6 +34,12 @@ const DEFAULT_H: f64 = 420.0;
 /// glyphs (`Widget.css` `.wPill`), `flex: 1` and vertically centered, so a few
 /// px of slack only adds centering — it never clips.
 const COMPACT_H: f64 = 48.0;
+/// Floor for the collapsed pill's width (a one-glyph pill) and the expanded
+/// view's minimums. Applied per-mode via `set_min_size` so the pill can shrink
+/// far below the expanded layout's usable width.
+const COMPACT_MIN_W: f64 = 56.0;
+const EXPANDED_MIN_W: f64 = 200.0;
+const EXPANDED_MIN_H: f64 = 120.0;
 
 /// View preferences shared with the webview. The window position is persisted
 /// separately (it changes on drag, not via the UI).
@@ -75,9 +82,9 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, WIDGET_LABEL, WebviewUrl::App("index.html".into()))
         .title("Beacon")
         .inner_size(DEFAULT_W, DEFAULT_H)
-        // Min height must sit below COMPACT_H or set_size would be clamped and
-        // the collapse couldn't shrink the window.
-        .min_inner_size(200.0, 40.0)
+        // Starting min for the expanded view; `apply_size` swaps this per mode
+        // (a collapsed pill needs a far smaller floor — see COMPACT_MIN_W).
+        .min_inner_size(EXPANDED_MIN_W, EXPANDED_MIN_H)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -177,9 +184,10 @@ pub fn set_compact(app: &AppHandle, compact: bool) {
     set_bool(app, KEY_COMPACT, compact);
     if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
         if compact {
-            // Capture the height we're collapsing from (the window is still
+            // Capture the size we're collapsing from (the window is still
             // expanded at this point) so expanding restores exactly that.
-            let (_, h) = logical_inner(&window);
+            let (w, h) = logical_inner(&window);
+            store_f64(app, KEY_EXPANDED_W, w);
             store_f64(app, KEY_EXPANDED_H, h);
         }
         apply_size(app, &window, compact);
@@ -187,17 +195,39 @@ pub fn set_compact(app: &AppHandle, compact: bool) {
 }
 
 /// Set the window to the size for `compact` without mutating the saved expanded
-/// height (used both by the toggle, after it has captured the height, and at
-/// startup). Width is preserved; manual resize is locked while collapsed.
+/// size (used both by the toggle, after it has captured the size, and at
+/// startup). Collapsing keeps the current width as a provisional value — the
+/// webview measures its content and calls [`set_compact_width`] to hug it.
+/// Manual resize and the size floor are adjusted per mode.
 fn apply_size(app: &AppHandle, window: &WebviewWindow, compact: bool) {
-    let (w, _) = logical_inner(window);
-    let target_h = if compact {
-        COMPACT_H
+    if compact {
+        // Lower the floor first: set_size is clamped to the min, and a pill is
+        // far narrower/shorter than the expanded minimum.
+        let _ = window.set_min_size(Some(LogicalSize::new(COMPACT_MIN_W, COMPACT_H)));
+        let (w, _) = logical_inner(window);
+        let _ = window.set_size(LogicalSize::new(w, COMPACT_H));
+        let _ = window.set_resizable(false);
     } else {
-        load_f64(app, KEY_EXPANDED_H).unwrap_or(DEFAULT_H)
-    };
-    let _ = window.set_size(LogicalSize::new(w, target_h));
-    let _ = window.set_resizable(!compact);
+        let _ = window.set_min_size(Some(LogicalSize::new(EXPANDED_MIN_W, EXPANDED_MIN_H)));
+        let w = load_f64(app, KEY_EXPANDED_W).unwrap_or(DEFAULT_W);
+        let h = load_f64(app, KEY_EXPANDED_H).unwrap_or(DEFAULT_H);
+        let _ = window.set_size(LogicalSize::new(w, h));
+        let _ = window.set_resizable(true);
+    }
+}
+
+/// Narrow the collapsed pill to the content width the webview measured, so it
+/// hugs its glyphs instead of keeping the expanded width. No-op unless the
+/// widget is currently collapsed (a late call arriving after the user expanded
+/// is ignored). Width is clamped to a sane pill range.
+pub fn set_compact_width(app: &AppHandle, width: f64) {
+    if !load_prefs(app).compact {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
+        let w = width.clamp(COMPACT_MIN_W, DEFAULT_W);
+        let _ = window.set_size(LogicalSize::new(w, COMPACT_H));
+    }
 }
 
 /// The window's current inner size in logical (DPI-independent) px. Falls back

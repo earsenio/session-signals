@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -31,6 +31,10 @@ function splitLabel(label: string): { folder: string; branch: string | null } {
   const m = label.match(/^(.*) \(([^)]+)\)$/);
   return m ? { folder: m[1], branch: m[2] } : { folder: label, branch: null };
 }
+
+/// Horizontal padding of `.wPill` (2 × --sp-4), added to the measured content
+/// width when sizing the collapsed window so the pill hugs its glyphs.
+const PILL_PAD_X = 26;
 
 /// Row state text per the design (richer than the tray tooltips).
 const ROW_STATE_TEXT: Record<SessionState, string> = {
@@ -143,6 +147,25 @@ function CompactPill({
 }) {
   // Tracks the press in flight: where it began and whether it became a drag.
   const press = useRef<{ x: number; y: number; dragging: boolean } | null>(null);
+  // Measures the pill's natural content width so the window can hug it.
+  const innerRef = useRef<HTMLDivElement>(null);
+
+  // Whenever the content's width changes (sessions added/removed, fonts settle)
+  // ask the shell to resize the collapsed window to fit. `.wPillInner` is
+  // `width: max-content`, so its measured width is the true content width
+  // regardless of the current window size — no resize feedback loop.
+  useLayoutEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+    const fit = () => {
+      const w = Math.ceil(el.getBoundingClientRect().width) + PILL_PAD_X;
+      invoke("widget_set_compact_width", { width: w }).catch(() => {});
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [sessions.length]);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
@@ -181,37 +204,39 @@ function CompactPill({
       onClick={onClick}
       title="Click to expand"
     >
-      <svg className="wGrip" width="7" height="16" viewBox="0 0 7 16" aria-hidden="true">
-        <circle cx="1.5" cy="3" r="1.4" />
-        <circle cx="5.5" cy="3" r="1.4" />
-        <circle cx="1.5" cy="8" r="1.4" />
-        <circle cx="5.5" cy="8" r="1.4" />
-        <circle cx="1.5" cy="13" r="1.4" />
-        <circle cx="5.5" cy="13" r="1.4" />
-      </svg>
-      {sessions.length === 0 ? (
-        <span className="wStripEmpty">idle</span>
-      ) : (
-        <>
-          {sessions.map((s) => (
-            <span
-              key={s.session_id}
-              className="wStripGlyph"
-              style={{ opacity: s.stale ? 0.5 : 1 }}
-              title={`${s.label} — ${s.stale ? "No response" : ROW_STATE_TEXT[s.state]}`}
-            >
-              <StateGlyph
-                shape={s.stale ? "ring" : shapeForState(s.state)}
-                color={rowColor(palette, s)}
-                size={17}
-                pulse={s.state === "working" && !s.stale}
-              />
-            </span>
-          ))}
-          <span className="wStripDivider" />
-          <span className="wStripCount">{sessions.length}</span>
-        </>
-      )}
+      <div className="wPillInner" ref={innerRef}>
+        <svg className="wGrip" width="7" height="16" viewBox="0 0 7 16" aria-hidden="true">
+          <circle cx="1.5" cy="3" r="1.4" />
+          <circle cx="5.5" cy="3" r="1.4" />
+          <circle cx="1.5" cy="8" r="1.4" />
+          <circle cx="5.5" cy="8" r="1.4" />
+          <circle cx="1.5" cy="13" r="1.4" />
+          <circle cx="5.5" cy="13" r="1.4" />
+        </svg>
+        {sessions.length === 0 ? (
+          <span className="wStripEmpty">idle</span>
+        ) : (
+          <>
+            {sessions.map((s) => (
+              <span
+                key={s.session_id}
+                className="wStripGlyph"
+                style={{ opacity: s.stale ? 0.5 : 1 }}
+                title={`${s.label} — ${s.stale ? "No response" : ROW_STATE_TEXT[s.state]}`}
+              >
+                <StateGlyph
+                  shape={s.stale ? "ring" : shapeForState(s.state)}
+                  color={rowColor(palette, s)}
+                  size={17}
+                  pulse={s.state === "working" && !s.stale}
+                />
+              </span>
+            ))}
+            <span className="wStripDivider" />
+            <span className="wStripCount">{sessions.length}</span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
