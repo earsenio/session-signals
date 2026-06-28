@@ -8,6 +8,10 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger: run against an existing tag ref, e.g.
+  #   gh workflow run release.yml --ref refs/tags/v0.1.1
+  # github.ref_name resolves to the tag, so the build/release target matches.
+  workflow_dispatch: {}
 
 jobs:
   release:
