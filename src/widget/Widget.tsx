@@ -78,11 +78,14 @@ function useEngineState() {
   const sessions = payload.sessions.map((s) => ({
     ...s,
     liveSeconds: s.seconds_in_state + elapsed,
+    // The subagent sub-line's ticking timer reuses the SAME local tick — no
+    // second timer. Only meaningful while at least one subagent is running.
+    subLiveSeconds: s.subagent_count > 0 ? s.subagent_seconds + elapsed : 0,
   }));
   return { rollup: payload.rollup, sessions };
 }
 
-type LiveSession = SessionView & { liveSeconds: number };
+type LiveSession = SessionView & { liveSeconds: number; subLiveSeconds: number };
 
 /// Short header summary derived from the rollup + live sessions (presentation).
 function headerStatus(rollup: Rollup, sessions: LiveSession[]): string {
@@ -102,29 +105,53 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
   const { folder, branch } = splitLabel(session.label);
   const color = rowColor(palette, session);
   const stateText = session.stale ? "No response" : ROW_STATE_TEXT[session.state];
+  // Subagent activity is independent of the row's own state: a session can be
+  // red (Needs you) or green (Ready) while subagents still run underneath.
+  const busy = session.subagent_count > 0;
+  const subLabel = `${session.subagent_count} ${
+    session.subagent_count === 1 ? "agent" : "agents"
+  } running`;
   return (
     <li className="wRow" style={{ opacity: session.stale ? 0.5 : 1 }}>
-      <StateGlyph
-        shape={session.stale ? "ring" : shapeForState(session.state)}
-        color={color}
-        size={22}
-        pulse={session.state === "working" && !session.stale}
-      />
-      <div className="wRowMain">
-        <div className="wRowLabel">
-          <span className="wRowFolder">{folder}</span>
-          {branch && (
-            <span className="wRowBranch">
-              <span className="wBranchIcon">⑃ </span>
-              {branch}
-            </span>
-          )}
+      <div className="wRowTop">
+        <span className="wGlyphWrap">
+          {/* Soft amber halo behind the glyph — always amber regardless of row
+              state, so it reads as "busy" without a second competing marker. */}
+          {busy && <span className="wBusyHalo" aria-hidden="true" />}
+          <span className="wGlyphFront">
+            <StateGlyph
+              shape={session.stale ? "ring" : shapeForState(session.state)}
+              color={color}
+              size={22}
+              pulse={session.state === "working" && !session.stale}
+            />
+          </span>
+        </span>
+        <div className="wRowMain">
+          <div className="wRowLabel">
+            <span className="wRowFolder">{folder}</span>
+            {branch && (
+              <span className="wRowBranch">
+                <span className="wBranchIcon">⑃ </span>
+                {branch}
+              </span>
+            )}
+          </div>
+          <div className="wRowState" style={{ color }}>
+            {stateText} <span className="wRowAge">· {formatAge(session.liveSeconds)}</span>
+          </div>
         </div>
-        <div className="wRowState" style={{ color }}>
-          {stateText} <span className="wRowAge">· {formatAge(session.liveSeconds)}</span>
-        </div>
+        <span className="wChevron">›</span>
       </div>
-      <span className="wChevron">›</span>
+      {/* Quiet sub-line: pulsing dot + count + ticking elapsed. Rendered only
+          while busy → no reserved height when the count is 0 (row reflows). */}
+      {busy && (
+        <div className="wSubline">
+          <span className="wSubDot" />
+          <span className="wSubLabel">{subLabel}</span>
+          <span className="wSubTimer">{formatAge(session.subLiveSeconds)}</span>
+        </div>
+      )}
     </li>
   );
 }

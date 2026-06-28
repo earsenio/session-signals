@@ -11,6 +11,10 @@ export interface SessionView {
   state: SessionState;
   stale: boolean;
   seconds_in_state: number;
+  /// Live subagents running under this session (SubagentStart − SubagentStop).
+  subagent_count: number;
+  /// Seconds since the subagent count rose from 0 (0 when none are running).
+  subagent_seconds: number;
 }
 
 export interface SessionsPayload {
