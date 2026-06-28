@@ -95,6 +95,14 @@ SessionEnd              → remove session
 - **Row:** status dot • label • state text • time-in-state.
 - **Expiry:** removed on `SessionEnd`; otherwise marked stale after
   `staleTimeoutMin` (default 10) of silence, then dropped after a short grace.
+- **Fork/resume duplicates:** a session launched with `--fork-session --resume
+  <parent>.jsonl` (e.g. computer-use automation) can emit hook events under
+  *both* the new and the parent `session_id`, so Beacon may briefly show a
+  duplicate "twin" row for the parent. This is a byproduct of forking, not a
+  bug: the hook payload carries no fork/parent linkage, and detecting it would
+  require process inspection (a locked-out decision), so we don't suppress it
+  while active. Once the fork stops emitting, the parent greys out via the
+  normal stale sweep. Ordinary terminal sessions don't fork and never duplicate.
 
 ## Defaults (all user-overridable in settings)
 

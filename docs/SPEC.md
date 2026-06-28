@@ -111,6 +111,13 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
   safely or fail loud without corrupting the file.
 - Two app instances → single-instance lock.
 - Notification storms on rapid transitions → debounce.
+- Fork/resume sessions (`--fork-session --resume <parent>.jsonl`, e.g.
+  computer-use automation) may emit under both the new and parent `session_id`,
+  surfacing a transient duplicate "twin" row. Not suppressed while active (no
+  fork linkage in the payload; process inspection is out of scope); the parent
+  greys out via the stale sweep once it stops emitting.
+- Widget must never get stuck on a stale snapshot: it reconciles against the
+  engine's `get_snapshot` on an interval + on focus, not push events alone.
 
 ## 8. Open / deferred (not v1)
 
