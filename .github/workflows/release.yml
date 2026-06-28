@@ -8,10 +8,15 @@ on:
   push:
     tags:
       - "v*"
-  # Manual trigger: run against an existing tag ref, e.g.
-  #   gh workflow run release.yml --ref refs/tags/v0.1.1
-  # github.ref_name resolves to the tag, so the build/release target matches.
-  workflow_dispatch: {}
+  # Manual trigger: dispatch from a branch that has this trigger (e.g. main) and
+  # pass the tag to build, e.g.
+  #   gh workflow run release.yml --ref main -f tag=v0.1.1
+  # Useful to (re)build an existing tag without re-tagging.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.1.1)"
+        required: true
 
 jobs:
   release:
@@ -28,7 +33,10 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
+      # On a tag push this is github.ref_name; on manual dispatch it's the input.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -64,8 +72,8 @@ jobs:
           # Windows Authenticode signing is configured via tauri.conf.json
           # bundle.windows.certificateThumbprint (+ a cert on the runner).
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Beacon ${{ github.ref_name }}"
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "Beacon ${{ inputs.tag || github.ref_name }}"
           releaseBody: "Download the installer for your platform below."
           # Draft so a human reviews the assets before publishing.
           releaseDraft: true
