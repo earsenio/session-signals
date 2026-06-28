@@ -17,6 +17,9 @@ export interface Config {
   idle_drop_min: number;
   launch_on_login: boolean;
   notify_idle: boolean;
+  /// Suppress a transition notification when that session's terminal is already
+  /// frontmost. On by default; unresolvable terminals always notify.
+  notify_unfocused_only: boolean;
   /// Active theme id (see src/themes). Unknown ids fall back to the default.
   theme: string;
   needs_you: StateNotify;
@@ -34,6 +37,7 @@ export const DEFAULT_CONFIG: Config = {
   idle_drop_min: 60,
   launch_on_login: false,
   notify_idle: false,
+  notify_unfocused_only: true,
   theme: "classic",
   needs_you: { enabled: true, sound: false, sound_name: "Ping" },
   working: { enabled: false, sound: false, sound_name: "Pop" },

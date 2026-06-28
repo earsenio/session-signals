@@ -30,8 +30,9 @@ fn install_then_uninstall_is_non_destructive() {
     let dir = sandbox("install");
     let settings = dir.join(".claude").join("settings.json");
 
-    // Install Beacon's hooks.
-    hooks::install(4317).expect("install ok");
+    // Install Beacon's hooks, including the terminal-capture command hook.
+    let capture = "sh '/tmp/beacon-capture.sh'";
+    hooks::install(4317, "tok-xyz", Some(capture)).expect("install ok");
     let v: Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).expect("valid JSON");
 
@@ -47,8 +48,31 @@ fn install_then_uninstall_is_non_destructive() {
         assert!(v["hooks"].get(ev).is_some(), "event {ev} missing after install");
     }
 
+    // The auth-token header is written into our hook.
+    assert_eq!(
+        v["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["hooks"][0]["url"] == "http://127.0.0.1:4317/hook")
+            .unwrap()["hooks"][0]["headers"]["X-Beacon-Token"],
+        "tok-xyz"
+    );
+
+    // The capture command hook rides on SessionStart alongside the http hook.
+    let ss = v["hooks"]["SessionStart"].as_array().unwrap();
+    assert!(
+        ss.iter()
+            .any(|g| g["hooks"][0]["type"] == "command"
+                && g["hooks"][0]["command"]
+                    .as_str()
+                    .map(|c| c.contains("beacon-capture"))
+                    .unwrap_or(false)),
+        "capture command hook missing on SessionStart"
+    );
+
     // Re-install must be idempotent (no duplicate Beacon entries on Stop).
-    hooks::install(4317).expect("reinstall ok");
+    hooks::install(4317, "tok-xyz", Some(capture)).expect("reinstall ok");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     let beacon_on_stop = v["hooks"]["Stop"]
         .as_array()

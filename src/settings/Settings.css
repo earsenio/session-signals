@@ -247,6 +247,11 @@ code {
   padding: 0 2px;
 }
 
+.sCheckHint {
+  color: var(--label-2);
+  font-size: 11px;
+}
+
 /* --- Segmented control (theme) --- */
 .sSegment {
   display: inline-flex;

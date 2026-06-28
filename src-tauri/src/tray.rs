@@ -247,7 +247,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
     match id {
         "widget" => windows::toggle(app),
         "install" => {
-            let msg = match hooks::install(port) {
+            let msg = match crate::install_beacon_hooks(app) {
                 Ok(path) => format!("Hooks installed in {}", path.display()),
                 Err(e) => format!("Install failed: {e}"),
             };

@@ -5,11 +5,14 @@
 //! (settings + widget) are thin renderers: they ask for snapshots/config and
 //! listen for updates. State flows one way — engine → events → UI.
 
+pub mod capture;
 pub mod config;
 pub mod engine;
+pub mod focus;
 pub mod hooks;
 mod listener;
 mod notify;
+pub mod token;
 mod tray;
 mod windows;
 
@@ -35,6 +38,10 @@ struct AppState {
     /// The currently-bound hook listener. Held so a port change can stop it
     /// (`unblock`) and swap in a new one.
     listener: Mutex<Option<Arc<Server>>>,
+    /// Shared listener auth token. Every installed hook posts it as a header;
+    /// the listener checks it on each request. Held in an `Arc<Mutex>` so a
+    /// "regenerate" swaps the secret live without restarting the listener.
+    token: listener::AuthToken,
     /// The active theme's tray palette, pushed from the webview. The tray icon is
     /// drawn from this; persisted so the look survives restarts.
     tray_palette: Mutex<TrayPalette>,
@@ -99,9 +106,11 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
 /// error). The `/state` readback closure reports the current rollup + snapshot.
 fn spawn_listener(app: &AppHandle, port: u16) -> std::io::Result<Arc<Server>> {
     let tx = app.state::<AppState>().events.clone();
+    let auth = app.state::<AppState>().token.clone();
     let state_handle = app.clone();
     listener::start(
         port,
+        auth,
         move |ev| {
             // Non-blocking: just enqueue. Ordering is preserved (single sender
             // per listener, single receiver).
@@ -126,6 +135,35 @@ fn current_port(app: &AppHandle) -> u16 {
         .lock()
         .expect("config mutex poisoned")
         .port
+}
+
+/// The current listener auth token.
+fn current_token(app: &AppHandle) -> String {
+    app.state::<AppState>()
+        .token
+        .lock()
+        .expect("token mutex poisoned")
+        .clone()
+}
+
+/// Install Beacon's hooks for an explicit port + token, (re)writing the terminal
+/// capture script first so the `SessionStart` command hook targets that listener.
+/// Capture is best-effort: if the script can't be written, the http hooks still
+/// install (click-to-focus simply won't be available). Takes the port/token
+/// explicitly because callers (e.g. a port change) need to install for the *new*
+/// values before the live config has been committed.
+fn install_beacon_hooks_for(
+    app: &AppHandle,
+    port: u16,
+    token: &str,
+) -> Result<std::path::PathBuf, String> {
+    let capture_cmd = capture::write_script(app, port, token);
+    hooks::install(port, token, capture_cmd.as_deref())
+}
+
+/// Install for the currently-live port + token.
+fn install_beacon_hooks(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    install_beacon_hooks_for(app, current_port(app), &current_token(app))
 }
 
 // --- Commands -------------------------------------------------------------
@@ -187,7 +225,7 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
         // Keep settings.json pointed at the new port — but only if Beacon's
         // hooks are actually installed (don't install just because port changed).
         if hooks::is_installed() {
-            hooks::install(new.port)?;
+            install_beacon_hooks_for(&app, new.port, &current_token(&app))?;
         }
     }
 
@@ -228,7 +266,7 @@ fn set_tray_palette(app: AppHandle, palette: TrayPalette) {
 
 #[tauri::command]
 fn install_hooks(app: AppHandle) -> Result<String, String> {
-    hooks::install(current_port(&app)).map(|p| p.display().to_string())
+    install_beacon_hooks(&app).map(|p| p.display().to_string())
 }
 
 #[tauri::command]
@@ -243,12 +281,48 @@ fn hooks_installed() -> bool {
 
 #[tauri::command]
 fn hook_block(app: AppHandle) -> String {
-    hooks::hook_block_string(current_port(&app))
+    hooks::hook_block_string(current_port(&app), &current_token(&app))
+}
+
+/// Mint a fresh listener token, swap it into the live listener, and — if hooks
+/// are installed — rewrite settings.json so the hooks carry the new token. The
+/// listener reads the shared token on each request, so sessions keep flowing
+/// across the swap. Order: persist first, then update the live value, so a save
+/// failure leaves the running token (and settings.json) untouched.
+#[tauri::command]
+fn regenerate_token(app: AppHandle) -> Result<(), String> {
+    let fresh = token::regenerate(&app)?;
+    {
+        let state = app.state::<AppState>();
+        *state.token.lock().expect("token mutex poisoned") = fresh.clone();
+    }
+    // Re-run the installer so the hooks' header (and capture script) match the
+    // new token. Only if they're actually installed.
+    if hooks::is_installed() {
+        install_beacon_hooks_for(&app, current_port(&app), &fresh)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn endpoint(app: AppHandle) -> String {
     hooks::endpoint(current_port(&app))
+}
+
+/// Raise the terminal window that owns `session_id`, if Beacon captured it.
+/// Returns whether a window was resolved and a raise attempted — the widget uses
+/// this to flash a "can't focus" hint on a false. Never errors/panics.
+#[tauri::command]
+fn focus_session(app: AppHandle, session_id: String) -> bool {
+    let pid = {
+        let state = app.state::<AppState>();
+        let eng = state.engine.lock().expect("engine mutex poisoned");
+        eng.terminal_pid(&session_id)
+    };
+    match pid {
+        Some(p) => focus::raise_pid(p),
+        None => false,
+    }
 }
 
 // --- Widget commands (called from the widget webview) ---------------------
@@ -333,6 +407,10 @@ pub fn run() {
             )),
             config: Mutex::new(Config::default()),
             listener: Mutex::new(None),
+            // Empty until setup() loads (or mints) the persisted token. The
+            // listener fails closed on an empty token, so nothing is accepted
+            // before setup runs.
+            token: Arc::new(Mutex::new(String::new())),
             // Classic until setup() loads the persisted palette.
             tray_palette: Mutex::new(TrayPalette::default()),
             notifier: Notifier::new(),
@@ -347,7 +425,9 @@ pub fn run() {
             uninstall_hooks,
             hooks_installed,
             hook_block,
+            regenerate_token,
             endpoint,
+            focus_session,
             widget_prefs,
             widget_set_compact,
             widget_set_compact_width,
@@ -371,6 +451,15 @@ pub fn run() {
                     }
                 })?;
 
+            // Load (or mint on first run) the listener auth token before the
+            // listener binds, so it's enforcing a real secret from the start.
+            let auth_token = token::load_or_create(&handle);
+            *handle
+                .state::<AppState>()
+                .token
+                .lock()
+                .expect("token mutex poisoned") = auth_token;
+
             // Load persisted config and align runtime state with it.
             let cfg = config::load(&handle);
             // Load the persisted tray palette (classic until the webview pushes
@@ -388,6 +477,23 @@ pub fn run() {
             notify::render_icons(&handle, &palette);
             // Keep the OS autostart entry in sync with the saved preference.
             let _ = set_autostart(&handle, cfg.launch_on_login);
+
+            // Startup hook health: if Beacon's hooks are installed but carry a
+            // stale/absent auth-token header (e.g. after upgrading to a
+            // token-enforcing build over pre-token hooks), the listener would
+            // 401 every event and silently track nothing. Auto-repair by
+            // re-running the installer with the live port + token — this also
+            // refreshes the capture script. The not-installed case is left to
+            // the first-run flow below.
+            if hooks::is_installed() && hooks::needs_token_repair(&current_token(&handle)) {
+                match install_beacon_hooks(&handle) {
+                    Ok(p) => eprintln!(
+                        "beacon: repaired stale hook auth token in {}",
+                        p.display()
+                    ),
+                    Err(e) => eprintln!("beacon: could not repair stale hooks: {e}"),
+                }
+            }
 
             // Tray-only app: no dock icon / app-switcher entry on macOS.
             #[cfg(target_os = "macos")]

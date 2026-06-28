@@ -67,6 +67,12 @@ pub struct Config {
     /// Notify when a session goes idle/stale. Off by default (spec: never notify
     /// on stale-drop unless enabled).
     pub notify_idle: bool,
+    /// Suppress a transition notification when that session's terminal window is
+    /// already frontmost — you're looking right at it. On by default. Falls back
+    /// to firing whenever the terminal can't be resolved, so a Needs-you alert is
+    /// never silently dropped. App/window level only: it can't tell which *tab*
+    /// of a multiplexed terminal or IDE is focused (see settings copy / docs).
+    pub notify_unfocused_only: bool,
     /// Active theme id (mirrors src/themes). The palette itself lives in the
     /// frontend; the backend only stores the chosen id and reacts to the palette
     /// the webview pushes via `set_tray_palette`.
@@ -85,6 +91,7 @@ impl Default for Config {
             idle_drop_min: DEFAULT_IDLE_DROP_MIN,
             launch_on_login: false,
             notify_idle: false,
+            notify_unfocused_only: true,
             theme: "classic".to_string(),
             // Spec defaults: Red on (sound off); Orange/Green off.
             needs_you: StateNotify::new(true, "Ping"),

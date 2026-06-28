@@ -146,6 +146,17 @@ export default function Settings() {
     }
   }, [hookBlock, flash]);
 
+  const regenerateToken = useCallback(async () => {
+    try {
+      await invoke("regenerate_token");
+      flash("Token regenerated", "ok");
+    } catch (e) {
+      flash(`Regenerate failed: ${String(e)}`, "err");
+    }
+    // Pull the refreshed hook block so the copy-paste fallback shows the new token.
+    refreshHooks();
+  }, [flash, refreshHooks]);
+
   return (
     <main className="settings">
       {!installed && (
@@ -173,6 +184,19 @@ export default function Settings() {
             onChange={(v) => patch({ notify_idle: v })}
           />
           <span>Notify when a session goes idle (stale)</span>
+        </label>
+        <label className="sCheckRow">
+          <Toggle
+            checked={cfg.notify_unfocused_only}
+            onChange={(v) => patch({ notify_unfocused_only: v })}
+          />
+          <span>
+            Only notify when the terminal isn’t focused
+            <span className="sCheckHint">
+              {" "}
+              · app-level: can’t tell which tab of a multiplexed terminal or IDE is active
+            </span>
+          </span>
         </label>
       </Section>
 
@@ -304,7 +328,18 @@ export default function Settings() {
             </button>
           </div>
           <p className="sHookNote">
-            Beacon detects sessions via hooks that POST to <code>{endpoint}</code>.
+            Beacon detects sessions via hooks that POST to <code>{endpoint}</code>. Each hook
+            carries a private token (the <code>X-Beacon-Token</code> header) so only Beacon’s own
+            hooks can report state — other local programs are rejected.
+          </p>
+          <div className="sHookBtns">
+            <button className="sBtn" onClick={regenerateToken}>
+              Regenerate token
+            </button>
+          </div>
+          <p className="sHookNote">
+            Regenerating mints a new secret and updates <code>settings.json</code> in place.
+            Sessions keep flowing — no restart needed.
           </p>
           <pre className="sCode">{hookBlock}</pre>
         </div>

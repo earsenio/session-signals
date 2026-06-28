@@ -38,3 +38,21 @@ tiny_http = "0.12"
 # Encode the theme-colored status dots to PNG for notification icons. (The tray
 # icon uses raw RGBA via tauri::image::Image and needs no encoder.)
 png = "0.17"
+# OS CSPRNG for the listener auth token (32 random bytes → hex).
+getrandom = "0.2"
+
+# --- Click-to-focus terminal (raise a window by its owning PID) ---
+# macOS: NSRunningApplication.activate / NSWorkspace.frontmostApplication. These
+# match the objc2 versions Tauri already pulls in, so no duplicate-crate bloat.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication"] }
+
+# Windows: EnumWindows / SetForegroundWindow / GetForegroundWindow.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Threading",
+] }

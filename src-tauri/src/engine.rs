@@ -52,6 +52,13 @@ struct Session {
     /// When `subagent_count` last rose from 0 — the anchor for the sub-line's
     /// ticking elapsed timer. `None` whenever the count is 0.
     sub_since: Option<Instant>,
+    /// PID of the terminal *application* hosting this session, captured by the
+    /// `SessionStart` command hook (see `capture.rs`). Drives click-to-focus and
+    /// focus-aware notifications. `None` until/unless capture resolves it.
+    terminal_pid: Option<i32>,
+    /// Human name of that terminal app (e.g. "iTerm2", "WindowsTerminal.exe"),
+    /// for display/debugging. Best-effort.
+    terminal_app: Option<String>,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -66,6 +73,12 @@ pub struct HookEvent {
     /// Present only on `Notification` events.
     #[serde(default)]
     pub notification_type: Option<String>,
+    /// Present only on the synthetic `BeaconTerminal` event from the capture
+    /// hook: the owning terminal app's pid and name.
+    #[serde(default)]
+    pub terminal_pid: Option<i32>,
+    #[serde(default)]
+    pub terminal_app: Option<String>,
 }
 
 /// A state change for one session, reported by `apply` so the notification
@@ -76,6 +89,9 @@ pub struct Transition {
     pub label: String,
     pub from: Option<State>,
     pub to: State,
+    /// The session's captured terminal pid at transition time, if known. Lets
+    /// the notifier suppress alerts when that terminal is already frontmost.
+    pub terminal_pid: Option<i32>,
 }
 
 /// Result of applying one hook event.
@@ -106,6 +122,9 @@ pub struct SessionView {
     pub subagent_count: u32,
     /// Seconds since the subagent count rose from 0 (0 when none are running).
     pub subagent_seconds: u64,
+    /// Whether Beacon resolved the owning terminal window — gates the widget's
+    /// click-to-focus affordance (no handle ⇒ no focus button).
+    pub can_focus: bool,
 }
 
 pub struct Engine {
@@ -219,6 +238,41 @@ impl Engine {
                 }
                 out
             }
+            // Synthetic event from the terminal-capture hook: record which
+            // terminal owns this session. No state change — a session can be in
+            // any color and still get (or refresh) its terminal mapping. Creates
+            // the session if it raced ahead of SessionStart so the pid isn't lost.
+            "BeaconTerminal" => {
+                let now = Instant::now();
+                let s = self
+                    .sessions
+                    .entry(ev.session_id.clone())
+                    .or_insert_with(|| Session {
+                        cwd: ev.cwd.clone(),
+                        state: State::Ready,
+                        last_seen: now,
+                        state_since: now,
+                        stale: false,
+                        subagent_count: 0,
+                        sub_since: None,
+                        terminal_pid: None,
+                        terminal_app: None,
+                    });
+                if ev.terminal_pid.is_some() {
+                    s.terminal_pid = ev.terminal_pid;
+                }
+                if ev.terminal_app.is_some() {
+                    s.terminal_app = ev.terminal_app.clone();
+                }
+                s.last_seen = now;
+                if !ev.cwd.is_empty() {
+                    s.cwd = ev.cwd.clone();
+                }
+                ApplyOutcome {
+                    changed: true,
+                    transition: None,
+                }
+            }
             "SessionEnd" => ApplyOutcome {
                 changed: self.sessions.remove(&ev.session_id).is_some(),
                 transition: None,
@@ -237,7 +291,7 @@ impl Engine {
     fn transition_to(&mut self, ev: &HookEvent, state: State) -> ApplyOutcome {
         let now = Instant::now();
         // `from`: Some(prev) on a real change, None on a same-state repeat.
-        let (from, cwd) = match self.sessions.entry(ev.session_id.clone()) {
+        let (from, cwd, terminal_pid) = match self.sessions.entry(ev.session_id.clone()) {
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let s = o.get_mut();
                 let prev = s.state;
@@ -251,7 +305,11 @@ impl Engine {
                 if !ev.cwd.is_empty() {
                     s.cwd = ev.cwd.clone();
                 }
-                (if changed_state { Some(Some(prev)) } else { None }, s.cwd.clone())
+                (
+                    if changed_state { Some(Some(prev)) } else { None },
+                    s.cwd.clone(),
+                    s.terminal_pid,
+                )
             }
             std::collections::hash_map::Entry::Vacant(v) => {
                 let cwd = ev.cwd.clone();
@@ -263,8 +321,10 @@ impl Engine {
                     stale: false,
                     subagent_count: 0,
                     sub_since: None,
+                    terminal_pid: None,
+                    terminal_app: None,
                 });
-                (Some(None), cwd)
+                (Some(None), cwd, None)
             }
         };
 
@@ -273,6 +333,7 @@ impl Engine {
             label: label_for(&cwd),
             from: prev,
             to: state,
+            terminal_pid,
         });
         ApplyOutcome {
             changed: true,
@@ -288,6 +349,12 @@ impl Engine {
             s.subagent_count = 0;
             s.sub_since = None;
         }
+    }
+
+    /// The captured terminal pid for a session, if Beacon resolved one. Used by
+    /// the click-to-focus command to know which window to raise.
+    pub fn terminal_pid(&self, id: &str) -> Option<i32> {
+        self.sessions.get(id).and_then(|s| s.terminal_pid)
     }
 
     /// Update the stale timeout at runtime (settings change). Existing sessions
@@ -380,6 +447,7 @@ impl Engine {
                     .sub_since
                     .map(|t| now.duration_since(t).as_secs())
                     .unwrap_or(0),
+                can_focus: s.terminal_pid.is_some(),
             })
             .collect();
         // Stable, useful ordering: live before stale, then by label.
@@ -455,6 +523,8 @@ mod tests {
             session_id: sid.to_string(),
             cwd: "/tmp/proj".to_string(),
             notification_type: None,
+            terminal_pid: None,
+            terminal_app: None,
         }
     }
 
@@ -464,6 +534,8 @@ mod tests {
             session_id: sid.to_string(),
             cwd: "/tmp/proj".to_string(),
             notification_type: Some(ty.to_string()),
+            terminal_pid: None,
+            terminal_app: None,
         }
     }
 
@@ -658,6 +730,33 @@ mod tests {
         let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
         assert_eq!(v.subagent_count, 0);
         assert_eq!(v.subagent_seconds, 0);
+    }
+
+    #[test]
+    fn beacon_terminal_records_pid_and_survives_state_changes() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        // Capture arrives (possibly before SessionStart) and records the pid.
+        let mut cap = ev("BeaconTerminal", "a");
+        cap.terminal_pid = Some(4242);
+        cap.terminal_app = Some("iTerm2".to_string());
+        e.apply(&cap);
+        assert_eq!(e.terminal_pid("a"), Some(4242));
+        // can_focus is exposed in the snapshot.
+        assert!(e.snapshot().iter().find(|v| v.session_id == "a").unwrap().can_focus);
+
+        // State changes don't drop the captured terminal, and the transition
+        // carries the pid for focus-aware notifications.
+        let out = e.apply(&notif("a", "permission_prompt"));
+        assert_eq!(e.terminal_pid("a"), Some(4242), "pid survives state change");
+        assert_eq!(out.transition.unwrap().terminal_pid, Some(4242));
+    }
+
+    #[test]
+    fn no_terminal_means_cannot_focus() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "a"));
+        assert_eq!(e.terminal_pid("a"), None);
+        assert!(!e.snapshot()[0].can_focus, "no pid ⇒ no focus affordance");
     }
 
     #[test]

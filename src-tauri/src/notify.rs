@@ -90,6 +90,19 @@ impl Notifier {
             return;
         }
 
+        // Focus-aware suppression: if you're already looking at this session's
+        // terminal, don't interrupt. Only suppress when we can prove it — both
+        // the session's terminal pid and the frontmost pid resolve AND match.
+        // Anything unresolvable falls through to firing, so a Needs-you alert is
+        // never silently dropped (per the Phase 5 brief).
+        if cfg.notify_unfocused_only {
+            if let Some(term_pid) = t.terminal_pid {
+                if crate::focus::frontmost_pid() == Some(term_pid) {
+                    return;
+                }
+            }
+        }
+
         // Debounce identical (session, to) transitions.
         let key = format!("{}:{:?}", t.session_id, t.to);
         {
