@@ -181,6 +181,11 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
               </span>
             )}
           </div>
+          {session.descriptor && (
+            <div className="wRowDesc" title={session.descriptor}>
+              {session.descriptor}
+            </div>
+          )}
           <div className="wRowState" style={{ color }}>
             {stateText} <span className="wRowAge">· {formatAge(session.liveSeconds)}</span>
           </div>
@@ -318,7 +323,9 @@ function CompactPill({
                 key={s.session_id}
                 className="wStripGlyph"
                 style={{ opacity: s.stale ? 0.5 : 1 }}
-                title={`${s.label} — ${s.stale ? "No response" : ROW_STATE_TEXT[s.state]}`}
+                title={`${s.label}${s.descriptor ? ` — ${s.descriptor}` : ""} — ${
+                  s.stale ? "No response" : ROW_STATE_TEXT[s.state]
+                }`}
               >
                 <StateGlyph
                   shape={s.stale ? "ring" : shapeForState(s.state)}

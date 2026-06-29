@@ -64,6 +64,15 @@ struct Session {
     /// terminals that expose a per-tab tty (Terminal.app, iTerm2), rather than
     /// only raising the app. `None` on Windows / when unresolved.
     terminal_tty: Option<String>,
+    /// Short human descriptor of what this session is about — Claude Code's own
+    /// generated session title (the `ai-title` in the transcript), falling back
+    /// to the first human prompt. Derived locally from `transcript_path` by
+    /// `descriptor::extract` and cached here so `snapshot` never does file I/O.
+    /// `None` until the transcript yields one (e.g. a brand-new session).
+    descriptor: Option<String>,
+    /// When we last *attempted* to (re)derive `descriptor`. Debounces the
+    /// transcript read so we don't re-scan the file on every hook event.
+    descriptor_checked_at: Option<Instant>,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -75,6 +84,11 @@ pub struct HookEvent {
     pub session_id: String,
     #[serde(default)]
     pub cwd: String,
+    /// Absolute path to this session's transcript JSONL. Present on every real
+    /// Claude Code hook event (not on the synthetic `BeaconTerminal`). The source
+    /// for the session descriptor — see `descriptor::extract`.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
     /// Present only on `Notification` events.
     #[serde(default)]
     pub notification_type: Option<String>,
@@ -146,6 +160,9 @@ pub struct SessionView {
     /// Whether Beacon resolved the owning terminal window — gates the widget's
     /// click-to-focus affordance (no handle ⇒ no focus button).
     pub can_focus: bool,
+    /// Short human descriptor of what the session is about (Claude Code's own
+    /// session title, else the first prompt). `None` until derivable. Display-only.
+    pub descriptor: Option<String>,
 }
 
 /// A terminal handle remembered across a Beacon restart. Capture lives only in
@@ -324,6 +341,8 @@ impl Engine {
                         terminal_pid: None,
                         terminal_app: None,
                         terminal_tty: None,
+                        descriptor: None,
+                        descriptor_checked_at: None,
                     });
                 if ev.terminal_pid.is_some() {
                     s.terminal_pid = ev.terminal_pid;
@@ -437,6 +456,8 @@ impl Engine {
                     terminal_pid: cap.pid,
                     terminal_app: cap.app,
                     terminal_tty: cap.tty,
+                    descriptor: None,
+                    descriptor_checked_at: None,
                 });
                 (Some(None), cwd, pid)
             }
@@ -488,6 +509,45 @@ impl Engine {
         self.sessions
             .get(id)
             .and_then(|s| s.terminal_pid.map(|p| (p, s.terminal_tty.clone(), s.terminal_app.clone())))
+    }
+
+    /// Whether the session's descriptor is worth (re)deriving from its transcript
+    /// now. The caller does the (off-lock) file read only when this says so,
+    /// keeping transcript I/O off the hot path. While we still have *no*
+    /// descriptor we retry on the shorter `retry` cadence (so the title shows up
+    /// soon after Claude Code writes it); once one is resolved we only re-check on
+    /// the longer `refresh` cadence (it rarely changes). `None` if the session is
+    /// gone or has never been checked (→ due immediately).
+    pub fn descriptor_due(&self, id: &str, retry: Duration, refresh: Duration) -> bool {
+        match self.sessions.get(id) {
+            None => false,
+            Some(s) => {
+                let interval = if s.descriptor.is_none() { retry } else { refresh };
+                match s.descriptor_checked_at {
+                    None => true,
+                    Some(t) => t.elapsed() >= interval,
+                }
+            }
+        }
+    }
+
+    /// Record the result of a descriptor derivation. Always stamps the check time
+    /// (so a fruitless read still debounces); updates the cached descriptor when
+    /// the value actually changed. Returns true if the displayed value changed
+    /// (worth a UI refresh). A no-op if the session is gone.
+    pub fn set_descriptor(&mut self, id: &str, value: Option<String>) -> bool {
+        match self.sessions.get_mut(id) {
+            None => false,
+            Some(s) => {
+                s.descriptor_checked_at = Some(Instant::now());
+                if value.is_some() && value != s.descriptor {
+                    s.descriptor = value;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 
     /// Update the stale timeout at runtime (settings change). Existing sessions
@@ -587,6 +647,7 @@ impl Engine {
                     .map(|t| now.duration_since(t).as_secs())
                     .unwrap_or(0),
                 can_focus: s.terminal_pid.is_some(),
+                descriptor: s.descriptor.clone(),
             })
             .collect();
         // Stable, useful ordering: live before stale, then by label.
@@ -1031,6 +1092,30 @@ mod tests {
         e.sweep(); // stale_timeout is 0 → goes stale immediately
         assert!(e.snapshot()[0].stale);
         assert_eq!(sub_count(&e, "a"), 0, "stale row drops its agent count");
+    }
+
+    #[test]
+    fn descriptor_due_set_and_snapshot() {
+        let retry = Duration::from_secs(5);
+        let refresh = Duration::from_secs(45);
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        // Unknown session is never due.
+        assert!(!e.descriptor_due("a", retry, refresh));
+        e.apply(&ev("SessionStart", "a"));
+        // Never checked → due immediately.
+        assert!(e.descriptor_due("a", retry, refresh));
+        // Setting a value reports a change, stamps checked-at, and surfaces in the
+        // snapshot; a fresh check is no longer due.
+        assert!(e.set_descriptor("a", Some("Audit the repo".to_string())));
+        assert!(!e.descriptor_due("a", retry, refresh), "just checked → not due");
+        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        assert_eq!(v.descriptor.as_deref(), Some("Audit the repo"));
+        // Same value → no change reported.
+        assert!(!e.set_descriptor("a", Some("Audit the repo".to_string())));
+        // A fruitless re-derivation (None) must not clear an existing descriptor.
+        assert!(!e.set_descriptor("a", None));
+        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        assert_eq!(v.descriptor.as_deref(), Some("Audit the repo"), "None doesn't clear");
     }
 
     #[test]
