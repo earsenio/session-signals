@@ -1,0 +1,23 @@
+# EditorConfig — https://editorconfig.org
+# Mirrors the repo conventions: 2-space web stack, 4-space Rust, LF, UTF-8.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Rust uses rustfmt defaults (4-space).
+[*.rs]
+indent_size = 4
+
+# Go-style / Makefiles require real tabs.
+[Makefile]
+indent_style = tab
+
+# Markdown: trailing whitespace is significant (hard line breaks).
+[*.md]
+trim_trailing_whitespace = false
