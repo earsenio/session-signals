@@ -32,6 +32,10 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# Claude Code — per-user local settings (machine paths + permission allowlist).
+# Never commit: the shared .claude/settings.json is fine, the *.local.json is not.
+.claude/settings.local.json
+
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/
