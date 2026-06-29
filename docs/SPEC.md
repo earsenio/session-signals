@@ -118,6 +118,17 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
   greys out via the stale sweep once it stops emitting.
 - Widget must never get stuck on a stale snapshot: it reconciles against the
   engine's `get_snapshot` on an interval + on focus, not push events alone.
+- Subagents share the parent's `session_id`, so their events must not overwrite
+  the parent row's state. Events carry `agent_id` (non-null only for subagents);
+  only main-agent events (`agent_id` absent) move a session into Working/Ready,
+  while subagent events heartbeat + drive the "N agents running" count. A real
+  block is the exception — `Notification(permission_prompt|elicitation_dialog)`
+  escalates to NeedsYou regardless of `agent_id` (a subagent's permission gate
+  still needs the user). Without this, a running subagent silently cleared a
+  pending "Needs you."
+- A session marked stale clears its subagent count, so a greyed "No response"
+  row never keeps asserting "N agents running" (the matching `SubagentStop` may
+  never have arrived before it went silent).
 
 ## 8. Open / deferred (not v1)
 

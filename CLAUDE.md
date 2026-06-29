@@ -57,16 +57,30 @@ Events wired: `SessionStart`, `UserPromptSubmit`, `PostToolUse` (heartbeat),
 ```
 SessionStart            → upsert session, state = READY,  lastSeen = now
 UserPromptSubmit        → state = WORKING,                lastSeen = now
-PostToolUse             → lastSeen = now (heartbeat; keep current WORKING state)
+PostToolUse             → lastSeen = now (heartbeat; keep current state)
 Notification:
   permission_prompt   |
   elicitation_dialog    → state = NEEDS_YOU,              lastSeen = now
   idle_prompt           → ignore (idle ≠ blocked; stays Ready until stale)
   auth_success / other  → ignore (no state change)
-Stop | SubagentStop     → state = READY,                  lastSeen = now
+Stop                    → state = READY,                  lastSeen = now
+SubagentStart           → subagentCount++,                lastSeen = now (no state change)
+SubagentStop            → subagentCount--,                lastSeen = now (no state change)
 SessionEnd              → remove session
-(no event for staleTimeout) → mark stale → drop after grace
+(no event for staleTimeout) → mark stale, subagentCount = 0 → drop after grace
 ```
+
+**Main agent vs. subagent (`agent_id`):** a subagent (Task tool) shares its
+parent's `session_id`, so its events would otherwise mutate the parent row. Every
+hook carries `agent_id` **only when emitted by a subagent** (null/absent for the
+main agent). Rule: **only the main agent moves a session into WORKING/READY;
+subagent events are heartbeat-only** (keep it live + drive `subagentCount`, never
+recolor the row). The sole exception is a *block*: a subagent hitting a permission
+gate still needs the user, so `Notification(permission_prompt|elicitation_dialog)`
+escalates to NEEDS_YOU regardless of `agent_id`. This is why a session can be
+RED/NEEDS_YOU with subagents running and not get cleared by their activity. The
+row's color tracks the main agent; the "N agents running" sub-line tracks
+subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
 
 > ⚠️ **Verify before building (Phase 1):** confirm exact event names, the
 > `Notification` payload's type field, and that `http` + `async` hooks are
@@ -87,6 +101,15 @@ SessionEnd              → remove session
 > (a non-2xx/timeout is a non-blocking error), and Beacon's listener answers
 > instantly, so an explicit `async` flag is unnecessary for `http` hooks. The
 > installed block uses an empty matcher (`""`) per event. See `hooks.rs`.
+
+> ✅ **Verified (Claude Code 2.1.x) — `agent_id` distinguishes subagents:**
+> empirically captured raw hook bodies (spawned an Explore subagent against the
+> live listener). On a **single `session_id`**, the main agent's events carry
+> `agent_id: null`, while the subagent's `PreToolUse` / `PostToolUse` /
+> `PostToolBatch` / `SubagentStart` / `SubagentStop` all carry a non-null
+> `agent_id` plus `agent_type` (e.g. `"Explore"`). This is the signal Beacon uses
+> to stop subagent activity from overwriting the parent's traffic-light state (the
+> `NEEDS_YOU`-masking bug). `HookEvent` now parses `agent_id`/`agent_type`.
 
 ## Session presentation
 
