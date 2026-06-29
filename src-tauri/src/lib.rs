@@ -7,6 +7,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod descriptor;
 pub mod engine;
 pub mod focus;
 pub mod hooks;
@@ -172,12 +173,58 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
         "SessionEnd" => forget_capture(app, &ev.session_id),
         _ => {}
     }
-    if outcome.changed {
+    // Derive the session descriptor from its transcript (debounced; bounded file
+    // read done off the engine lock). A change is worth a UI refresh too.
+    let desc_changed = maybe_refresh_descriptor(app, &ev);
+    if outcome.changed || desc_changed {
         refresh(app);
     }
     if let Some(t) = outcome.transition {
         on_transition(app, &t);
     }
+}
+
+/// How long to wait between transcript reads while a session still has no
+/// descriptor (short, so it appears quickly) vs. once one is resolved (the
+/// descriptor tracks the latest prompt, so keep this modest for freshness; a new
+/// prompt also forces an immediate read — see below).
+const DESCRIPTOR_RETRY_SECS: u64 = 5;
+const DESCRIPTOR_REFRESH_SECS: u64 = 15;
+
+/// Derive/refresh a session's descriptor from its transcript. Debounced via the
+/// engine (`descriptor_due`); the bounded file read runs with the engine lock
+/// released so transcript I/O never blocks other sessions' event processing.
+/// Returns whether the displayed descriptor changed.
+fn maybe_refresh_descriptor(app: &AppHandle, ev: &HookEvent) -> bool {
+    // Only real Claude hook events carry a transcript; the synthetic
+    // `BeaconTerminal` does not.
+    let Some(path) = ev.transcript_path.as_deref() else {
+        return false;
+    };
+    if ev.session_id.is_empty() {
+        return false;
+    }
+    let state = app.state::<AppState>();
+    // A freshly-submitted prompt is exactly when the descriptor changes, so read
+    // it right away instead of waiting out the debounce.
+    let force = ev.hook_event_name == "UserPromptSubmit";
+    if !force {
+        let due = {
+            let eng = state.engine.lock().expect("engine mutex poisoned");
+            eng.descriptor_due(
+                &ev.session_id,
+                Duration::from_secs(DESCRIPTOR_RETRY_SECS),
+                Duration::from_secs(DESCRIPTOR_REFRESH_SECS),
+            )
+        };
+        if !due {
+            return false;
+        }
+    }
+    // Bounded transcript read — lock intentionally NOT held here.
+    let value = descriptor::extract(path);
+    let mut eng = state.engine.lock().expect("engine mutex poisoned");
+    eng.set_descriptor(&ev.session_id, value)
 }
 
 /// Build and start a listener on `port`. The hook callback does the minimum —
