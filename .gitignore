@@ -36,6 +36,10 @@ pnpm-debug.log*
 # Never commit: the shared .claude/settings.json is fine, the *.local.json is not.
 .claude/settings.local.json
 
+# Internal scaffolding (design briefs, build prompts, planning docs) — kept in the
+# tree for contributors locally but not published as user-facing docs.
+docs/internal/
+
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/

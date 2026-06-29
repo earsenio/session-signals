@@ -7,8 +7,8 @@ icon shows a rollup status; a floating always-on-top widget shows a per-session
 breakdown. Traffic-light semantics. Themes are swappable.
 
 This file is the standing context for every Claude Code turn in this repo. The
-full requirements live in `docs/SPEC.md`. The build runs in four phases; each
-phase has a `/goal` prompt in `prompts/`.
+full requirements live in `docs/SPEC.md`. The app was built in four phases (all
+complete — see **Build phases** below).
 
 ---
 
@@ -153,8 +153,7 @@ cc-beacon/
 │  │  ├─ hooks.rs       # settings.json install/uninstall (non-destructive)
 │  │  └─ windows.rs     # floating widget + settings windows
 │  └─ tauri.conf.json
-├─ docs/SPEC.md
-└─ prompts/phase-*.md
+└─ docs/SPEC.md
 ```
 
 ## Conventions
@@ -183,9 +182,14 @@ cc-beacon/
 
 ## Build phases
 
-1. `prompts/phase-1-foundation.md` — hooks → listener → engine → tray rollup.
-2. `prompts/phase-2-widget.md` — floating widget + per-session breakdown.
-3. `prompts/phase-3-notifications.md` — configurable notifications + settings.
-4. `prompts/phase-4-themes.md` — data-driven themes + packaging/polish.
+The app was built in four ordered phases, each ending runnable and demoable.
+All four are **complete**; this is the historical roadmap, kept for context:
 
-Build phases in order. Each phase must end runnable and demoable.
+1. **Foundation** — hooks → listener → engine → tray rollup.
+2. **Widget** — floating widget + per-session breakdown.
+3. **Notifications** — configurable notifications + settings.
+4. **Themes** — data-driven themes + packaging/polish.
+
+(The original per-phase `/goal` build prompts are no longer tracked in the
+published tree; any internal scratch lives under `docs/internal/`, which is
+gitignored.)
