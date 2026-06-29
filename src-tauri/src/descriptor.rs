@@ -5,20 +5,21 @@
 //!
 //! Source of truth, in priority order, all read from the session's transcript
 //! JSONL (`transcript_path`, carried on every real hook event):
-//!   1. `ai-title` — Claude Code's own generated session title (3–8 words). The
-//!      file carries many as it regenerates over the session's life; we take the
-//!      **last** one (freshest), which is why we read the file's *tail*.
-//!   2. The first human-typed `user` prompt (skipping tool-result and
-//!      slash-command/hook-wrapper entries) — the brand-new-session fallback
-//!      before any title exists; such files are short, so the tail is the whole
-//!      file and "first" is genuinely first.
-//!   3. Legacy `summary` (`.summary`) for older Claude Code schemas.
+//!   1. `last-prompt` — Claude Code's record of the **most recent user prompt**,
+//!      rewritten every turn. This tracks what the session is *currently* doing.
+//!      We take the last (freshest) non-command-wrapper one. Preferred because
+//!      `ai-title` (below) only regenerates occasionally and so lags real work.
+//!   2. `ai-title` — Claude Code's generated session title (3–8 words). Used when
+//!      there's no usable prompt yet. Take the last (freshest) one.
+//!   3. The first human-typed `user` prompt (skipping tool-result and
+//!      slash-command/hook-wrapper entries) — a brand-new-session fallback.
+//!   4. Legacy `summary` (`.summary`) for older Claude Code schemas.
 //!
 //! We read only a bounded tail window — a multi-MB transcript is never scanned
-//! end to end, keeping this cheap enough to run on the event worker. A session
-//! large enough to exceed the window always has `ai-title` records in its tail
-//! (titles regenerate per turn), so the prompt fallback only matters for small
-//! files where the tail covers everything.
+//! end to end, keeping this cheap enough to run on the event worker. The
+//! freshest `last-prompt`/`ai-title` are at the very end, so the tail captures
+//! them; the first-prompt fallback only matters for tiny new-session files where
+//! the tail covers the whole file anyway.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -48,6 +49,7 @@ pub fn extract(transcript_path: &str) -> Option<String> {
 /// The pure parsing core (transcript text in, descriptor out) — file-free so it
 /// can be unit-tested directly.
 fn extract_from_str(text: &str) -> Option<String> {
+    let mut last_prompt: Option<String> = None;
     let mut last_ai_title: Option<String> = None;
     let mut first_prompt: Option<String> = None;
     let mut first_summary: Option<String> = None;
@@ -62,6 +64,15 @@ fn extract_from_str(text: &str) -> Option<String> {
             Err(_) => continue, // partial trailing line or non-JSON noise
         };
         match v.get("type").and_then(|t| t.as_str()) {
+            Some("last-prompt") => {
+                // Freshest real prompt wins; skip command/hook wrappers (e.g. a
+                // trailing `/compact`) so the row keeps showing the last typed task.
+                if let Some(p) = v.get("lastPrompt").and_then(|p| p.as_str()) {
+                    if !is_wrapper(p) {
+                        last_prompt = Some(p.to_string());
+                    }
+                }
+            }
             Some("ai-title") => {
                 if let Some(t) = v.get("aiTitle").and_then(|t| t.as_str()) {
                     last_ai_title = Some(t.to_string());
@@ -83,11 +94,18 @@ fn extract_from_str(text: &str) -> Option<String> {
         }
     }
 
-    // ai-title (freshest) → first human prompt → legacy summary.
-    last_ai_title
+    // Latest prompt (current work) → freshest title → first prompt → legacy summary.
+    last_prompt
+        .or(last_ai_title)
         .or(first_prompt)
         .or(first_summary)
         .and_then(|s| clean(&s))
+}
+
+/// True for a slash-command / local-command wrapper string (not a typed task).
+fn is_wrapper(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with("<command-") || t.starts_with("<local-command-")
 }
 
 /// Extract a genuinely human-typed prompt string from a `type=="user"` entry, or
@@ -102,8 +120,7 @@ fn human_prompt(v: &serde_json::Value) -> Option<String> {
     }
     // Real typed prompts have a *string* content; tool results are arrays.
     let content = v.get("message")?.get("content")?.as_str()?;
-    let trimmed = content.trim_start();
-    if trimmed.starts_with("<command-") || trimmed.starts_with("<local-command-") {
+    if is_wrapper(content) {
         return None;
     }
     Some(content.to_string())
@@ -130,11 +147,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_last_ai_title() {
+    fn latest_prompt_wins_over_title() {
+        // The whole point of the fix: a fresh prompt beats the (stale) title.
+        let t = r#"
+{"type":"ai-title","aiTitle":"Debug background opacity blinking issue"}
+{"type":"last-prompt","lastPrompt":"please reconcile the section and commit"}
+"#;
+        assert_eq!(
+            extract_from_str(t).as_deref(),
+            Some("please reconcile the section and commit")
+        );
+    }
+
+    #[test]
+    fn latest_prompt_takes_freshest_non_wrapper() {
+        // Multiple last-prompt records; the freshest real one wins, and a trailing
+        // slash-command wrapper is skipped (we keep showing the last typed task).
+        let t = r#"
+{"type":"last-prompt","lastPrompt":"first task"}
+{"type":"last-prompt","lastPrompt":"the current task"}
+{"type":"last-prompt","lastPrompt":"<command-name>/compact</command-name>"}
+"#;
+        assert_eq!(extract_from_str(t).as_deref(), Some("the current task"));
+    }
+
+    #[test]
+    fn prefers_last_ai_title_when_no_prompt() {
+        // No last-prompt yet → fall back to the freshest ai-title.
         let t = r#"
 {"type":"mode","mode":"default"}
 {"type":"ai-title","aiTitle":"Initial title"}
-{"type":"user","message":{"role":"user","content":"do the thing"}}
 {"type":"ai-title","aiTitle":"Refined session title"}
 "#;
         assert_eq!(extract_from_str(t).as_deref(), Some("Refined session title"));

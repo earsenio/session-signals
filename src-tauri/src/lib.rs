@@ -185,10 +185,11 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
 }
 
 /// How long to wait between transcript reads while a session still has no
-/// descriptor (short, so the title appears soon after Claude Code writes it) vs.
-/// once one is resolved (long, since it rarely changes).
+/// descriptor (short, so it appears quickly) vs. once one is resolved (the
+/// descriptor tracks the latest prompt, so keep this modest for freshness; a new
+/// prompt also forces an immediate read — see below).
 const DESCRIPTOR_RETRY_SECS: u64 = 5;
-const DESCRIPTOR_REFRESH_SECS: u64 = 45;
+const DESCRIPTOR_REFRESH_SECS: u64 = 15;
 
 /// Derive/refresh a session's descriptor from its transcript. Debounced via the
 /// engine (`descriptor_due`); the bounded file read runs with the engine lock
@@ -204,16 +205,21 @@ fn maybe_refresh_descriptor(app: &AppHandle, ev: &HookEvent) -> bool {
         return false;
     }
     let state = app.state::<AppState>();
-    let due = {
-        let eng = state.engine.lock().expect("engine mutex poisoned");
-        eng.descriptor_due(
-            &ev.session_id,
-            Duration::from_secs(DESCRIPTOR_RETRY_SECS),
-            Duration::from_secs(DESCRIPTOR_REFRESH_SECS),
-        )
-    };
-    if !due {
-        return false;
+    // A freshly-submitted prompt is exactly when the descriptor changes, so read
+    // it right away instead of waiting out the debounce.
+    let force = ev.hook_event_name == "UserPromptSubmit";
+    if !force {
+        let due = {
+            let eng = state.engine.lock().expect("engine mutex poisoned");
+            eng.descriptor_due(
+                &ev.session_id,
+                Duration::from_secs(DESCRIPTOR_RETRY_SECS),
+                Duration::from_secs(DESCRIPTOR_REFRESH_SECS),
+            )
+        };
+        if !due {
+            return false;
+        }
     }
     // Bounded transcript read — lock intentionally NOT held here.
     let value = descriptor::extract(path);
