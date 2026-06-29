@@ -18,6 +18,10 @@ export interface SessionView {
   /// Whether Beacon resolved the owning terminal window — gates the row's
   /// click-to-focus affordance.
   can_focus: boolean;
+  /// Short descriptor of what the session is about — Claude Code's own session
+  /// title (else the first prompt), derived locally from the transcript. `null`
+  /// until one is available (e.g. a brand-new session). Display-only.
+  descriptor: string | null;
 }
 
 export interface SessionsPayload {
