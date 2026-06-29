@@ -78,6 +78,19 @@ pub struct HookEvent {
     /// Present only on `Notification` events.
     #[serde(default)]
     pub notification_type: Option<String>,
+    /// Identifies the agent that emitted the event. **Present (non-null) only on
+    /// subagent events; null/absent on the main agent.** A subagent shares its
+    /// parent's `session_id`, so this is the only signal that an event came from
+    /// a fanned-out subagent rather than the main agent. Verified empirically on
+    /// Claude Code 2.1.x (subagent `PreToolUse`/`PostToolUse`/`SubagentStart`/
+    /// `SubagentStop` all carry it; main-agent events do not). Used to keep
+    /// subagent activity from overwriting the session's traffic-light state.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// The subagent's type (e.g. "Explore"), present alongside `agent_id`.
+    /// Captured for display/debugging; not currently used for state logic.
+    #[serde(default)]
+    pub agent_type: Option<String>,
     /// Present only on the synthetic `BeaconTerminal` event from the capture
     /// hook: the owning terminal app's pid and name.
     #[serde(default)]
@@ -186,27 +199,52 @@ impl Engine {
             };
         }
 
+        // A subagent (Task tool) shares its parent's `session_id`, so without
+        // this its events would mutate the parent row's traffic-light state — a
+        // running subagent could clear a real "Needs you" (verified: subagent
+        // events carry `agent_id`, the main agent's do not). The rule: only the
+        // MAIN agent moves a session into Working/Ready; subagent events are
+        // heartbeat-only (they keep the session live + drive the subagent count,
+        // but never change its color). A genuine *block* is the one exception —
+        // see `Notification` below — because a subagent hitting a permission gate
+        // still needs the user, so it must be allowed to escalate to NeedsYou.
+        let is_subagent = ev.agent_id.is_some();
+
         match ev.hook_event_name.as_str() {
             // A fresh (or resumed) session: clear any leftover subagent count so a
-            // restart never inherits a stale "N agents running" sub-line.
+            // restart never inherits a stale "N agents running" sub-line. (Main
+            // agent only; a subagent never legitimately starts a session — if one
+            // somehow does, treat it as a heartbeat, not a reset.)
             "SessionStart" => {
-                let out = self.transition_to(ev, State::Ready);
-                self.reset_subagents(&ev.session_id);
-                out
+                if is_subagent {
+                    self.heartbeat(ev)
+                } else {
+                    let out = self.transition_to(ev, State::Ready);
+                    self.reset_subagents(&ev.session_id);
+                    out
+                }
             }
             // Any work-start signal means the session is actively running. We
             // bracket "Working" between these and the terminal events below, so
             // activity that doesn't begin with a typed prompt — slash-command
             // expansion, a tool call, context compaction — still shows up.
             // (`/compact` fires PreCompact, never UserPromptSubmit, which is why
-            // it used to stay green.)
+            // it used to stay green.) A subagent's tool call must NOT flip the
+            // parent's color, so it heartbeats instead.
             "UserPromptSubmit" | "UserPromptExpansion" | "PreToolUse" | "PreCompact" => {
-                self.transition_to(ev, State::Working)
+                if is_subagent {
+                    self.heartbeat(ev)
+                } else {
+                    self.transition_to(ev, State::Working)
+                }
             }
-            // A spawned subagent: the parent is working, and we bump the live
-            // subagent count. The first one anchors the sub-line's elapsed timer.
+            // A spawned subagent: bump the live subagent count (the first one
+            // anchors the sub-line's elapsed timer). This does NOT change the
+            // session's state — the main agent's own `PreToolUse` for the Task
+            // tool already moved it to Working; the count drives the independent
+            // "N agents running" sub-line.
             "SubagentStart" => {
-                let out = self.transition_to(ev, State::Working);
+                let out = self.heartbeat(ev);
                 if let Some(s) = self.sessions.get_mut(&ev.session_id) {
                     if s.subagent_count == 0 {
                         s.sub_since = Some(Instant::now());
@@ -215,26 +253,16 @@ impl Engine {
                 }
                 out
             }
-            "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" => {
-                // Heartbeat: keep current state, just refresh last_seen. If we
-                // somehow never saw this session start, a tool running means
-                // it's working.
-                if let Some(s) = self.sessions.get_mut(&ev.session_id) {
-                    s.last_seen = Instant::now();
-                    s.stale = false;
-                    if !ev.cwd.is_empty() {
-                        s.cwd = ev.cwd.clone();
-                    }
-                    ApplyOutcome {
-                        changed: true,
-                        transition: None,
-                    }
-                } else {
-                    self.transition_to(ev, State::Working)
-                }
-            }
+            // Heartbeat: keep current state, just refresh last_seen. Also the
+            // landing spot for any main-agent work-start / terminal event that
+            // arrived from a subagent (`is_subagent`) — those keep the session
+            // live without recoloring it.
+            "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" => self.heartbeat(ev),
             "Notification" => match ev.notification_type.as_deref() {
-                // Only a genuine block on the user is "Needs you".
+                // Only a genuine block on the user is "Needs you". This is the one
+                // state a subagent IS allowed to set: if a fanned-out subagent hits
+                // a permission gate, the user still has to act, so we escalate to
+                // NeedsYou regardless of `is_subagent`.
                 Some("permission_prompt") | Some("elicitation_dialog") => {
                     self.transition_to(ev, State::NeedsYou)
                 }
@@ -251,12 +279,23 @@ impl Engine {
             // Terminal: the turn (or compaction) ended. `PostCompact` returns a
             // standalone `/compact` to Ready; mid-turn it briefly shows Ready
             // until the next work event flips it back (self-healing).
-            // `StopFailure` is a turn ended by an API error.
-            "Stop" | "StopFailure" | "PostCompact" => self.transition_to(ev, State::Ready),
+            // `StopFailure` is a turn ended by an API error. Only the MAIN agent's
+            // turn ending means the row is Ready — a subagent's `Stop` must not
+            // clear the parent's state (esp. a pending "Needs you").
+            "Stop" | "StopFailure" | "PostCompact" => {
+                if is_subagent {
+                    self.heartbeat(ev)
+                } else {
+                    self.transition_to(ev, State::Ready)
+                }
+            }
             // A subagent finished: decrement (clamped), and when the last one
-            // leaves, drop the elapsed anchor so the sub-line disappears.
+            // leaves, drop the elapsed anchor so the sub-line disappears. Like
+            // `SubagentStart`, this only touches the count — it does NOT move the
+            // session to Ready, which previously flipped a still-working (or
+            // still-blocked) parent to green the instant any subagent stopped.
             "SubagentStop" => {
-                let out = self.transition_to(ev, State::Ready);
+                let out = self.heartbeat(ev);
                 if let Some(s) = self.sessions.get_mut(&ev.session_id) {
                     s.subagent_count = s.subagent_count.saturating_sub(1);
                     if s.subagent_count == 0 {
@@ -318,6 +357,29 @@ impl Engine {
                 changed: false,
                 transition: None,
             },
+        }
+    }
+
+    /// Refresh a session's liveness (`last_seen`, un-stale, `cwd`) WITHOUT
+    /// changing its traffic-light state. This is the heartbeat used by
+    /// `PostToolUse` and by every subagent event — the latter must keep the
+    /// session alive and feed the subagent count without recoloring the row. If
+    /// the session is unknown (we never saw it start), fall back to creating it
+    /// as Working via `transition_to`, which also rehydrates any remembered
+    /// terminal capture.
+    fn heartbeat(&mut self, ev: &HookEvent) -> ApplyOutcome {
+        if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+            s.last_seen = Instant::now();
+            s.stale = false;
+            if !ev.cwd.is_empty() {
+                s.cwd = ev.cwd.clone();
+            }
+            ApplyOutcome {
+                changed: true,
+                transition: None,
+            }
+        } else {
+            self.transition_to(ev, State::Working)
         }
     }
 
@@ -466,6 +528,12 @@ impl Engine {
             if should_be_stale != s.stale {
                 if should_be_stale {
                     went_stale.push((id.clone(), label_for(&s.cwd)));
+                    // A session we've declared silent ("No response") must not keep
+                    // asserting live subagents — the matching SubagentStop may simply
+                    // never have arrived. Clear the count so a greyed row doesn't read
+                    // "idle · 1 agent running".
+                    s.subagent_count = 0;
+                    s.sub_since = None;
                 }
                 s.stale = should_be_stale;
                 changed = true;
@@ -593,10 +661,17 @@ mod tests {
             hook_event_name: name.to_string(),
             session_id: sid.to_string(),
             cwd: "/tmp/proj".to_string(),
-            notification_type: None,
-            terminal_pid: None,
-            terminal_app: None,
-            terminal_tty: None,
+            ..Default::default()
+        }
+    }
+
+    /// A subagent-emitted event: same `session_id` as the parent, but carrying an
+    /// `agent_id` (and `agent_type`) the way real Claude Code subagent hooks do.
+    fn sub_ev(name: &str, sid: &str) -> HookEvent {
+        HookEvent {
+            agent_id: Some("sub-1".to_string()),
+            agent_type: Some("Explore".to_string()),
+            ..ev(name, sid)
         }
     }
 
@@ -606,9 +681,7 @@ mod tests {
             session_id: sid.to_string(),
             cwd: "/tmp/proj".to_string(),
             notification_type: Some(ty.to_string()),
-            terminal_pid: None,
-            terminal_app: None,
-            terminal_tty: None,
+            ..Default::default()
         }
     }
 
@@ -750,6 +823,14 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn state_of(e: &Engine, sid: &str) -> State {
+        e.snapshot()
+            .into_iter()
+            .find(|v| v.session_id == sid)
+            .map(|v| v.state)
+            .expect("session present")
+    }
+
     #[test]
     fn subagent_count_rises_and_falls() {
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
@@ -871,6 +952,85 @@ mod tests {
         // Recreating the row now must NOT resurrect the forgotten handle.
         e.apply(&ev("PostToolUse", "a"));
         assert_eq!(e.terminal_pid("a"), None, "SessionEnd dropped the seed");
+    }
+
+    // --- Subagent events must not overwrite the parent's traffic-light state ---
+
+    #[test]
+    fn subagent_tool_calls_do_not_clear_needs_you() {
+        // The reported bug: blocked on a permission while subagents run, a
+        // subagent's tool calls must NOT flip the row off red.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&notif("a", "permission_prompt"));
+        assert_eq!(e.rollup(), Rollup::Red);
+        e.apply(&sub_ev("PreToolUse", "a"));
+        e.apply(&sub_ev("PostToolUse", "a"));
+        assert_eq!(e.rollup(), Rollup::Red, "subagent activity kept NeedsYou");
+        assert_eq!(state_of(&e, "a"), State::NeedsYou);
+    }
+
+    #[test]
+    fn subagent_stop_does_not_clear_needs_you() {
+        // SubagentStop used to call transition_to(Ready) — it must not, or the
+        // last subagent finishing would turn a still-blocked parent green.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&sub_ev("SubagentStart", "a"));
+        e.apply(&notif("a", "permission_prompt"));
+        assert_eq!(e.rollup(), Rollup::Red);
+        e.apply(&sub_ev("SubagentStop", "a"));
+        assert_eq!(state_of(&e, "a"), State::NeedsYou, "subagent stop left red intact");
+        assert_eq!(sub_count(&e, "a"), 0, "but the count still decremented");
+    }
+
+    #[test]
+    fn main_agent_pretooluse_clears_needs_you() {
+        // The legitimate path off red: the user approves, the MAIN agent's tool
+        // runs (agent_id absent) → Working.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&notif("a", "permission_prompt"));
+        assert_eq!(e.rollup(), Rollup::Red);
+        e.apply(&ev("PreToolUse", "a")); // main agent, no agent_id
+        assert_eq!(state_of(&e, "a"), State::Working, "user-approved tool flips to Working");
+    }
+
+    #[test]
+    fn subagent_permission_prompt_still_escalates() {
+        // A block is a block: a subagent hitting a permission gate must set
+        // NeedsYou even though it's a subagent event.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        assert_eq!(e.rollup(), Rollup::Orange);
+        let mut block = notif("a", "permission_prompt");
+        block.agent_id = Some("sub-1".to_string());
+        e.apply(&block);
+        assert_eq!(state_of(&e, "a"), State::NeedsYou, "subagent block still needs the user");
+    }
+
+    #[test]
+    fn subagent_count_independent_of_main_state() {
+        // State is pinned by main-agent events; the count moves only with
+        // subagent start/stop — the two never interfere.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a")); // main → Working
+        e.apply(&sub_ev("SubagentStart", "a"));
+        e.apply(&sub_ev("SubagentStart", "a"));
+        assert_eq!(state_of(&e, "a"), State::Working);
+        assert_eq!(sub_count(&e, "a"), 2);
+        e.apply(&sub_ev("SubagentStop", "a")); // a subagent ends mid-turn...
+        assert_eq!(state_of(&e, "a"), State::Working, "...but the parent stays Working");
+        assert_eq!(sub_count(&e, "a"), 1);
+    }
+
+    #[test]
+    fn stale_sweep_clears_subagent_count() {
+        // A greyed "No response" row must not keep claiming running agents.
+        let mut e = Engine::new(Duration::from_millis(0), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        e.apply(&sub_ev("SubagentStart", "a"));
+        assert_eq!(sub_count(&e, "a"), 1);
+        e.sweep(); // stale_timeout is 0 → goes stale immediately
+        assert!(e.snapshot()[0].stale);
+        assert_eq!(sub_count(&e, "a"), 0, "stale row drops its agent count");
     }
 
     #[test]
