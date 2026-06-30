@@ -4,7 +4,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_CONFIG, SOUNDS, type Config, type StateNotify } from "../state/config";
 import { useTheme } from "../themes/useTheme";
 import { THEME_LIST, type ThemePalette } from "../themes";
-import { shapeForState, StateGlyph } from "../components/StateGlyph";
+import { StateGlyph } from "../components/StateGlyph";
+import { shapeForState } from "../components/glyphShape";
 import "./Settings.css";
 
 type StateKey = "needs_you" | "working" | "ready";
@@ -34,9 +35,15 @@ export default function Settings() {
   }, []);
 
   const refreshHooks = useCallback(() => {
-    invoke<boolean>("hooks_installed").then(setInstalled).catch(() => {});
-    invoke<string>("endpoint").then(setEndpoint).catch(() => {});
-    invoke<string>("hook_block").then(setHookBlock).catch(() => {});
+    invoke<boolean>("hooks_installed")
+      .then(setInstalled)
+      .catch(() => {});
+    invoke<string>("endpoint")
+      .then(setEndpoint)
+      .catch(() => {});
+    invoke<string>("hook_block")
+      .then(setHookBlock)
+      .catch(() => {});
   }, []);
 
   // Initial load.
@@ -50,7 +57,9 @@ export default function Settings() {
     refreshHooks();
     // Read the running app version straight from Tauri so it always reflects the
     // built bundle — never hardcoded (single source of truth is package.json).
-    getVersion().then(setAppVersion).catch(() => {});
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => {});
   }, [refreshHooks]);
 
   // Persist a full config and reflect backend errors.
@@ -160,7 +169,12 @@ export default function Settings() {
   return (
     <main className="settings">
       {!installed && (
-        <Onboarding hookBlock={hookBlock} onInstall={install} onCopy={copyBlock} palette={palette} />
+        <Onboarding
+          hookBlock={hookBlock}
+          onInstall={install}
+          onCopy={copyBlock}
+          palette={palette}
+        />
       )}
 
       <Section label="Notifications">
@@ -179,10 +193,7 @@ export default function Settings() {
           ))}
         </div>
         <label className="sCheckRow">
-          <Toggle
-            checked={cfg.notify_idle}
-            onChange={(v) => patch({ notify_idle: v })}
-          />
+          <Toggle checked={cfg.notify_idle} onChange={(v) => patch({ notify_idle: v })} />
           <span>Notify when a session goes idle (stale)</span>
         </label>
         <label className="sCheckRow">
@@ -276,10 +287,7 @@ export default function Settings() {
               <span className="sRowTitle">Launch at login</span>
               <span className="sRowHint">Start Beacon quietly in the tray</span>
             </div>
-            <Toggle
-              checked={cfg.launch_on_login}
-              onChange={(v) => patch({ launch_on_login: v })}
-            />
+            <Toggle checked={cfg.launch_on_login} onChange={(v) => patch({ launch_on_login: v })} />
           </div>
 
           <div className="sRow">
@@ -388,7 +396,16 @@ function Toggle({
 
 function SoundIcon({ on }: { on: boolean }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <path d="M5 9 H8.5 L12.5 5 V19 L8.5 15 H5 Z" />
       {on ? (
         <path d="M16.5 9.5 a4 4 0 0 1 0 5" fill="none" strokeLinecap="round" />
@@ -477,9 +494,8 @@ function Onboarding({
       </div>
       <h1 className="sOnboardTitle">One quick setup</h1>
       <p className="sOnboardDesc">
-        Beacon watches your Claude Code sessions through a small hook in its config. Add it
-        once and Beacon will know the moment a session needs you, starts working, or finishes
-        its turn.
+        Beacon watches your Claude Code sessions through a small hook in its config. Add it once and
+        Beacon will know the moment a session needs you, starts working, or finishes its turn.
       </p>
       <button className="sOnboardBtn" onClick={onInstall}>
         Set up automatically

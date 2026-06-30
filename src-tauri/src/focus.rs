@@ -32,14 +32,15 @@ pub fn raise(t: &FocusTarget) -> bool {
     if let Some(tty) = t.tty.as_deref().filter(|s| !s.is_empty()) {
         let app = t.app.as_deref().unwrap_or("");
         // `comm` basenames: Terminal.app → "Terminal", iTerm2 → "iTerm2".
-        if app.eq_ignore_ascii_case("Terminal") {
-            if raise_terminal_app_tab(tty) {
-                return true;
-            }
+        let tab_raised = if app.eq_ignore_ascii_case("Terminal") {
+            raise_terminal_app_tab(tty)
         } else if app.eq_ignore_ascii_case("iTerm2") || app.eq_ignore_ascii_case("iTerm") {
-            if raise_iterm_tab(tty) {
-                return true;
-            }
+            raise_iterm_tab(tty)
+        } else {
+            false
+        };
+        if tab_raised {
+            return true;
         }
     }
     raise_pid(t.pid)
@@ -203,10 +204,7 @@ pub fn raise_pid(pid: i32) -> bool {
         found: None,
     };
     unsafe {
-        let _ = EnumWindows(
-            Some(enum_proc),
-            LPARAM(&mut search as *mut Search as isize),
-        );
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut search as *mut Search as isize));
         match search.found {
             Some(hwnd) => {
                 // Standard foreground-permission nudge + un-minimize, then raise.

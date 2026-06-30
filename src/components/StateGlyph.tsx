@@ -2,25 +2,7 @@
 // (greyscale-safe, legible at 16px). Shape is a fixed function of the state;
 // the theme only supplies the color. Geometry is 1:1 with the design's Glyph.
 
-import type { Rollup, SessionState } from "../state/types";
-
-export type GlyphShape = "square" | "dot" | "check" | "ring";
-
-/// needs you → square · working → dot · ready → check.
-export function shapeForState(state: SessionState): GlyphShape {
-  return state === "needs_you" ? "square" : state === "working" ? "dot" : "check";
-}
-
-/// Tray rollup → shape (grey/none → ring).
-export function shapeForRollup(rollup: Rollup): GlyphShape {
-  return rollup === "red"
-    ? "square"
-    : rollup === "orange"
-      ? "dot"
-      : rollup === "green"
-        ? "check"
-        : "ring";
-}
+import type { GlyphShape } from "./glyphShape";
 
 export function StateGlyph({
   shape,

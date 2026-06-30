@@ -179,7 +179,10 @@ mod tests {
 {"type":"ai-title","aiTitle":"Initial title"}
 {"type":"ai-title","aiTitle":"Refined session title"}
 "#;
-        assert_eq!(extract_from_str(t).as_deref(), Some("Refined session title"));
+        assert_eq!(
+            extract_from_str(t).as_deref(),
+            Some("Refined session title")
+        );
     }
 
     #[test]
@@ -193,7 +196,10 @@ mod tests {
 {"type":"user","message":{"role":"user","content":"add a session descriptor"}}
 {"type":"user","message":{"role":"user","content":"a later prompt"}}
 "#;
-        assert_eq!(extract_from_str(t).as_deref(), Some("add a session descriptor"));
+        assert_eq!(
+            extract_from_str(t).as_deref(),
+            Some("add a session descriptor")
+        );
     }
 
     #[test]
@@ -202,7 +208,10 @@ mod tests {
 {"type":"summary","summary":"Old-schema session summary"}
 {"type":"assistant","message":{"role":"assistant","content":"hi"}}
 "#;
-        assert_eq!(extract_from_str(t).as_deref(), Some("Old-schema session summary"));
+        assert_eq!(
+            extract_from_str(t).as_deref(),
+            Some("Old-schema session summary")
+        );
     }
 
     #[test]
@@ -232,15 +241,18 @@ mod tests {
     fn extract_reads_a_real_file() {
         // Exercises the file-read/seek path end to end (small file → tail is the
         // whole file, seek start = 0).
-        let path = std::env::temp_dir()
-            .join(format!("beacon_desc_test_{}.jsonl", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("beacon_desc_test_{}.jsonl", std::process::id()));
         std::fs::write(
             &path,
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n\
              {\"type\":\"ai-title\",\"aiTitle\":\"Real File Title\"}\n",
         )
         .unwrap();
-        assert_eq!(extract(path.to_str().unwrap()).as_deref(), Some("Real File Title"));
+        assert_eq!(
+            extract(path.to_str().unwrap()).as_deref(),
+            Some("Real File Title")
+        );
         let _ = std::fs::remove_file(&path);
         // A missing path is a clean None, never a panic.
         assert_eq!(extract("/no/such/transcript.jsonl"), None);

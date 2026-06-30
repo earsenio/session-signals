@@ -118,10 +118,20 @@ fn signed_distance(shape: Shape, px: f32, py: f32, scale: f32) -> f32 {
         }
         Shape::Check => {
             let d = dist_segment(
-                px, py, 5.0 * scale, 12.6 * scale, 10.0 * scale, 17.4 * scale,
+                px,
+                py,
+                5.0 * scale,
+                12.6 * scale,
+                10.0 * scale,
+                17.4 * scale,
             )
             .min(dist_segment(
-                px, py, 10.0 * scale, 17.4 * scale, 19.3 * scale, 6.8 * scale,
+                px,
+                py,
+                10.0 * scale,
+                17.4 * scale,
+                19.3 * scale,
+                6.8 * scale,
             ));
             d - 1.6 * scale // half of the 3.2 stroke
         }
@@ -164,7 +174,11 @@ pub fn encode_png(rgba: &[u8], size: u32) -> Option<Vec<u8>> {
 
 /// Build the tray glyph for a rollup from the given palette.
 fn icon_for(palette: &TrayPalette, rollup: Rollup) -> Image<'static> {
-    let buf = render_glyph_rgba(shape_for_rollup(rollup), palette.rollup_rgb(rollup), TRAY_SIZE);
+    let buf = render_glyph_rgba(
+        shape_for_rollup(rollup),
+        palette.rollup_rgb(rollup),
+        TRAY_SIZE,
+    );
     Image::new_owned(buf, TRAY_SIZE, TRAY_SIZE)
 }
 
@@ -203,9 +217,14 @@ pub fn save_palette(app: &AppHandle, palette: &TrayPalette) {
 /// Build the tray icon and menu. Starts grey (no sessions yet), using `palette`.
 pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
     let widget = MenuItem::with_id(app, "widget", "Show / hide widget", true, None::<&str>)?;
-    let install = MenuItem::with_id(app, "install", "Install Claude Code hooks", true, None::<&str>)?;
-    let uninstall =
-        MenuItem::with_id(app, "uninstall", "Uninstall hooks", true, None::<&str>)?;
+    let install = MenuItem::with_id(
+        app,
+        "install",
+        "Install Claude Code hooks",
+        true,
+        None::<&str>,
+    )?;
+    let uninstall = MenuItem::with_id(app, "uninstall", "Uninstall hooks", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Open Beacon…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Beacon", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;

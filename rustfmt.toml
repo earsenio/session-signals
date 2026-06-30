@@ -1,0 +1,4 @@
+# rustfmt configuration for the Tauri shell (src-tauri).
+# Stable options only, so `cargo fmt` works on the stable toolchain in CI.
+edition = "2021"
+max_width = 100

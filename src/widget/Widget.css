@@ -274,7 +274,10 @@ body {
   color: var(--text-3);
   opacity: 0.55;
   flex: none;
-  transition: opacity 0.12s ease, color 0.12s ease, transform 0.12s ease;
+  transition:
+    opacity 0.12s ease,
+    color 0.12s ease,
+    transform 0.12s ease;
 }
 
 .wRowFocusable:hover .wOpenIcon {
