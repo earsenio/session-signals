@@ -436,7 +436,11 @@ impl Engine {
                     }
                 }
                 (
-                    if changed_state { Some(Some(prev)) } else { None },
+                    if changed_state {
+                        Some(Some(prev))
+                    } else {
+                        None
+                    },
                     s.cwd.clone(),
                     s.terminal_pid,
                 )
@@ -506,9 +510,10 @@ impl Engine {
     /// `focus.rs` select the exact tab on macOS terminals; the pid is the
     /// app-level fallback. `None` until Beacon captured at least a pid.
     pub fn focus_target(&self, id: &str) -> Option<(i32, Option<String>, Option<String>)> {
-        self.sessions
-            .get(id)
-            .and_then(|s| s.terminal_pid.map(|p| (p, s.terminal_tty.clone(), s.terminal_app.clone())))
+        self.sessions.get(id).and_then(|s| {
+            s.terminal_pid
+                .map(|p| (p, s.terminal_tty.clone(), s.terminal_app.clone()))
+        })
     }
 
     /// Whether the session's descriptor is worth (re)deriving from its transcript
@@ -522,7 +527,11 @@ impl Engine {
         match self.sessions.get(id) {
             None => false,
             Some(s) => {
-                let interval = if s.descriptor.is_none() { retry } else { refresh };
+                let interval = if s.descriptor.is_none() {
+                    retry
+                } else {
+                    refresh
+                };
                 match s.descriptor_checked_at {
                     None => true,
                     Some(t) => t.elapsed() >= interval,
@@ -651,11 +660,7 @@ impl Engine {
             })
             .collect();
         // Stable, useful ordering: live before stale, then by label.
-        views.sort_by(|a, b| {
-            a.stale
-                .cmp(&b.stale)
-                .then_with(|| a.label.cmp(&b.label))
-        });
+        views.sort_by(|a, b| a.stale.cmp(&b.stale).then_with(|| a.label.cmp(&b.label)));
         views
     }
 }
@@ -709,8 +714,7 @@ fn read_git_branch(root: &Path) -> Option<String> {
     let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
     let head = head.trim();
     // Typical content: "ref: refs/heads/main"
-    head.strip_prefix("ref: refs/heads/")
-        .map(|b| b.to_string())
+    head.strip_prefix("ref: refs/heads/").map(|b| b.to_string())
 }
 
 #[cfg(test)]
@@ -766,7 +770,7 @@ mod tests {
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.apply(&ev("UserPromptSubmit", "a")); // working
         e.apply(&notif("b", "permission_prompt")); // needs you
-        // One Working + one Needs-you → Red.
+                                                   // One Working + one Needs-you → Red.
         assert_eq!(e.rollup(), Rollup::Red);
         e.apply(&ev("Stop", "b")); // b now ready
         assert_eq!(e.rollup(), Rollup::Orange); // a still working
@@ -810,7 +814,10 @@ mod tests {
 
         // An idle_prompt must NOT flip it to red, and must not be a transition.
         let out = e.apply(&notif("a", "idle_prompt"));
-        assert!(out.transition.is_none(), "idle_prompt should not transition");
+        assert!(
+            out.transition.is_none(),
+            "idle_prompt should not transition"
+        );
         assert_eq!(e.rollup(), Rollup::Green, "idle session stays green");
 
         // A genuine permission prompt still turns it red.
@@ -938,11 +945,19 @@ mod tests {
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.apply(&ev("SubagentStart", "a"));
         // Busy → a real elapsed anchor (seconds is small but the field exists).
-        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        let v = e
+            .snapshot()
+            .into_iter()
+            .find(|v| v.session_id == "a")
+            .unwrap();
         assert_eq!(v.subagent_count, 1);
         // Idle → seconds reported as 0.
         e.apply(&ev("SubagentStop", "a"));
-        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        let v = e
+            .snapshot()
+            .into_iter()
+            .find(|v| v.session_id == "a")
+            .unwrap();
         assert_eq!(v.subagent_count, 0);
         assert_eq!(v.subagent_seconds, 0);
     }
@@ -957,7 +972,13 @@ mod tests {
         e.apply(&cap);
         assert_eq!(e.terminal_pid("a"), Some(4242));
         // can_focus is exposed in the snapshot.
-        assert!(e.snapshot().iter().find(|v| v.session_id == "a").unwrap().can_focus);
+        assert!(
+            e.snapshot()
+                .iter()
+                .find(|v| v.session_id == "a")
+                .unwrap()
+                .can_focus
+        );
 
         // State changes don't drop the captured terminal, and the transition
         // carries the pid for focus-aware notifications.
@@ -994,10 +1015,28 @@ mod tests {
         // The first real event recreates the row AND picks up the handle, so
         // click-to-focus is back without a fresh SessionStart.
         e.apply(&ev("PostToolUse", "a"));
-        assert_eq!(e.terminal_pid("a"), Some(7777), "handle rehydrated on first event");
-        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
-        assert!(v.can_focus, "rehydrated handle restores the focus affordance");
-        assert_eq!(e.focus_target("a"), Some((7777, Some("/dev/ttys003".to_string()), Some("Terminal".to_string()))));
+        assert_eq!(
+            e.terminal_pid("a"),
+            Some(7777),
+            "handle rehydrated on first event"
+        );
+        let v = e
+            .snapshot()
+            .into_iter()
+            .find(|v| v.session_id == "a")
+            .unwrap();
+        assert!(
+            v.can_focus,
+            "rehydrated handle restores the focus affordance"
+        );
+        assert_eq!(
+            e.focus_target("a"),
+            Some((
+                7777,
+                Some("/dev/ttys003".to_string()),
+                Some("Terminal".to_string())
+            ))
+        );
     }
 
     #[test]
@@ -1007,7 +1046,11 @@ mod tests {
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.seed_capture(
             "a".to_string(),
-            CapturedTerminal { pid: Some(7777), app: None, tty: None },
+            CapturedTerminal {
+                pid: Some(7777),
+                app: None,
+                tty: None,
+            },
         );
         e.apply(&ev("SessionEnd", "a"));
         // Recreating the row now must NOT resurrect the forgotten handle.
@@ -1039,7 +1082,11 @@ mod tests {
         e.apply(&notif("a", "permission_prompt"));
         assert_eq!(e.rollup(), Rollup::Red);
         e.apply(&sub_ev("SubagentStop", "a"));
-        assert_eq!(state_of(&e, "a"), State::NeedsYou, "subagent stop left red intact");
+        assert_eq!(
+            state_of(&e, "a"),
+            State::NeedsYou,
+            "subagent stop left red intact"
+        );
         assert_eq!(sub_count(&e, "a"), 0, "but the count still decremented");
     }
 
@@ -1051,7 +1098,11 @@ mod tests {
         e.apply(&notif("a", "permission_prompt"));
         assert_eq!(e.rollup(), Rollup::Red);
         e.apply(&ev("PreToolUse", "a")); // main agent, no agent_id
-        assert_eq!(state_of(&e, "a"), State::Working, "user-approved tool flips to Working");
+        assert_eq!(
+            state_of(&e, "a"),
+            State::Working,
+            "user-approved tool flips to Working"
+        );
     }
 
     #[test]
@@ -1064,7 +1115,11 @@ mod tests {
         let mut block = notif("a", "permission_prompt");
         block.agent_id = Some("sub-1".to_string());
         e.apply(&block);
-        assert_eq!(state_of(&e, "a"), State::NeedsYou, "subagent block still needs the user");
+        assert_eq!(
+            state_of(&e, "a"),
+            State::NeedsYou,
+            "subagent block still needs the user"
+        );
     }
 
     #[test]
@@ -1078,7 +1133,11 @@ mod tests {
         assert_eq!(state_of(&e, "a"), State::Working);
         assert_eq!(sub_count(&e, "a"), 2);
         e.apply(&sub_ev("SubagentStop", "a")); // a subagent ends mid-turn...
-        assert_eq!(state_of(&e, "a"), State::Working, "...but the parent stays Working");
+        assert_eq!(
+            state_of(&e, "a"),
+            State::Working,
+            "...but the parent stays Working"
+        );
         assert_eq!(sub_count(&e, "a"), 1);
     }
 
@@ -1107,15 +1166,30 @@ mod tests {
         // Setting a value reports a change, stamps checked-at, and surfaces in the
         // snapshot; a fresh check is no longer due.
         assert!(e.set_descriptor("a", Some("Audit the repo".to_string())));
-        assert!(!e.descriptor_due("a", retry, refresh), "just checked → not due");
-        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
+        assert!(
+            !e.descriptor_due("a", retry, refresh),
+            "just checked → not due"
+        );
+        let v = e
+            .snapshot()
+            .into_iter()
+            .find(|v| v.session_id == "a")
+            .unwrap();
         assert_eq!(v.descriptor.as_deref(), Some("Audit the repo"));
         // Same value → no change reported.
         assert!(!e.set_descriptor("a", Some("Audit the repo".to_string())));
         // A fruitless re-derivation (None) must not clear an existing descriptor.
         assert!(!e.set_descriptor("a", None));
-        let v = e.snapshot().into_iter().find(|v| v.session_id == "a").unwrap();
-        assert_eq!(v.descriptor.as_deref(), Some("Audit the repo"), "None doesn't clear");
+        let v = e
+            .snapshot()
+            .into_iter()
+            .find(|v| v.session_id == "a")
+            .unwrap();
+        assert_eq!(
+            v.descriptor.as_deref(),
+            Some("Audit the repo"),
+            "None doesn't clear"
+        );
     }
 
     #[test]
@@ -1140,6 +1214,107 @@ mod tests {
         }
         assert_eq!(e.snapshot().len(), 1, "stale session stays visible");
         assert!(e.snapshot()[0].stale, "and is marked stale (grey)");
+        assert_eq!(e.rollup(), Rollup::Grey);
+    }
+
+    // --- Added coverage: event→state derivation table, full rollup priority
+    //     ordering, and stale-sweep exclusion / revival ---
+
+    #[test]
+    fn event_to_state_derivation_table() {
+        // Each state-driving main-agent event, applied to a fresh session, lands
+        // the row in the state documented in the CLAUDE.md hook contract.
+        let cases: &[(&str, State)] = &[
+            ("SessionStart", State::Ready),
+            ("UserPromptSubmit", State::Working),
+            ("PreToolUse", State::Working),
+            ("PreCompact", State::Working),
+            ("PostCompact", State::Ready),
+            ("Stop", State::Ready),
+        ];
+        for (name, want) in cases {
+            let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+            e.apply(&ev(name, "a"));
+            assert_eq!(
+                state_of(&e, "a"),
+                *want,
+                "event {name} should derive {want:?}"
+            );
+        }
+        // Both NeedsYou notification types escalate identically; an ignored one
+        // (idle_prompt) creates the row but leaves it Ready, never NeedsYou.
+        for ty in ["permission_prompt", "elicitation_dialog"] {
+            let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+            e.apply(&notif("a", ty));
+            assert_eq!(state_of(&e, "a"), State::NeedsYou, "{ty} → NeedsYou");
+        }
+    }
+
+    #[test]
+    fn rollup_full_priority_ordering() {
+        // Walk Grey → Green → Orange → Red, proving each higher-priority state
+        // dominates regardless of how many lower-priority sessions are present,
+        // then unwind back down as sessions end.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        assert_eq!(e.rollup(), Rollup::Grey, "no sessions → Grey");
+
+        e.apply(&ev("SessionStart", "ready")); // Ready
+        assert_eq!(e.rollup(), Rollup::Green);
+
+        e.apply(&ev("UserPromptSubmit", "working")); // + Working
+        assert_eq!(e.rollup(), Rollup::Orange, "Working outranks Ready");
+
+        e.apply(&notif("needs", "permission_prompt")); // + NeedsYou
+        assert_eq!(e.rollup(), Rollup::Red, "NeedsYou outranks all");
+
+        // Unwind: dropping the red session falls back to Orange (Working remains),
+        // then to Green (only Ready remains), then to Grey (empty).
+        e.apply(&ev("SessionEnd", "needs"));
+        assert_eq!(e.rollup(), Rollup::Orange);
+        e.apply(&ev("SessionEnd", "working"));
+        assert_eq!(e.rollup(), Rollup::Green);
+        e.apply(&ev("SessionEnd", "ready"));
+        assert_eq!(e.rollup(), Rollup::Grey);
+    }
+
+    #[test]
+    fn rollup_excludes_stale_sessions() {
+        // A stale (silent) session must not color the tray: a session that would
+        // be Red while live is invisible to the rollup once swept stale, so an
+        // all-stale engine reads Grey rather than Red.
+        let mut e = Engine::new(Duration::from_millis(0), Duration::from_secs(3600));
+        e.apply(&notif("old", "permission_prompt")); // live → would be Red
+        assert_eq!(e.rollup(), Rollup::Red);
+        e.sweep(); // stale_timeout 0 → immediately stale
+        assert!(e.snapshot()[0].stale, "swept stale");
+        assert_eq!(e.rollup(), Rollup::Grey, "all-stale → Grey, not Red");
+    }
+
+    #[test]
+    fn stale_session_revives_on_next_event() {
+        // After a sweep greys a session, the next hook event un-stales it and
+        // restores its color in the rollup (heartbeat clears `stale`).
+        let mut e = Engine::new(Duration::from_millis(0), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        e.sweep();
+        assert!(e.snapshot()[0].stale, "went stale");
+        assert_eq!(e.rollup(), Rollup::Grey);
+
+        e.apply(&ev("PostToolUse", "a")); // heartbeat
+        assert!(!e.snapshot()[0].stale, "event revived the row");
+        assert_eq!(
+            e.rollup(),
+            Rollup::Orange,
+            "back to its prior Working state"
+        );
+    }
+
+    #[test]
+    fn sweep_on_empty_engine_is_noop() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        let out = e.sweep();
+        assert!(!out.changed, "nothing to sweep");
+        assert!(out.went_stale.is_empty());
         assert_eq!(e.rollup(), Rollup::Grey);
     }
 }
