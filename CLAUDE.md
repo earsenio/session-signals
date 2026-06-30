@@ -1,6 +1,9 @@
-# CLAUDE.md — cc-beacon
+# CLAUDE.md — Session Signals
 
-> Working name: **Beacon** (`cc-beacon`). Rename freely.
+> Display name: **Session Signals**. Internal codenames are deliberately kept and
+> NOT renamed (they're opaque to users): the crate/repo-local name `cc-beacon`,
+> the lib `beacon_lib`, the store file `beacon.json`, the `X-Beacon-Token` header,
+> the `beacon-capture` hook marker, and the `com.beacon.cc` bundle identifier.
 
 A lightweight desktop status indicator for Claude Code users. A tray/menu-bar
 icon shows a rollup status; a floating always-on-top widget shows a per-session
@@ -98,7 +101,7 @@ subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
 > stale sweep greys it), as are `auth_success` / `elicitation_complete`. Every
 > event includes `session_id`, `cwd`,
 > `transcript_path`, `hook_event_name`. HTTP hooks are non-blocking by nature
-> (a non-2xx/timeout is a non-blocking error), and Beacon's listener answers
+> (a non-2xx/timeout is a non-blocking error), and Session Signals' listener answers
 > instantly, so an explicit `async` flag is unnecessary for `http` hooks. The
 > installed block uses an empty matcher (`""`) per event. See `hooks.rs`.
 
@@ -107,7 +110,7 @@ subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
 > live listener). On a **single `session_id`**, the main agent's events carry
 > `agent_id: null`, while the subagent's `PreToolUse` / `PostToolUse` /
 > `PostToolBatch` / `SubagentStart` / `SubagentStop` all carry a non-null
-> `agent_id` plus `agent_type` (e.g. `"Explore"`). This is the signal Beacon uses
+> `agent_id` plus `agent_type` (e.g. `"Explore"`). This is the signal Session Signals uses
 > to stop subagent activity from overwriting the parent's traffic-light state (the
 > `NEEDS_YOU`-masking bug). `HookEvent` now parses `agent_id`/`agent_type`.
 
@@ -120,7 +123,7 @@ subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
   `staleTimeoutMin` (default 10) of silence, then dropped after a short grace.
 - **Fork/resume duplicates:** a session launched with `--fork-session --resume
   <parent>.jsonl` (e.g. computer-use automation) can emit hook events under
-  *both* the new and the parent `session_id`, so Beacon may briefly show a
+  *both* the new and the parent `session_id`, so Session Signals may briefly show a
   duplicate "twin" row for the parent. This is a byproduct of forking, not a
   bug: the hook payload carries no fork/parent linkage, and detecting it would
   require process inspection (a locked-out decision), so we don't suppress it
@@ -139,7 +142,7 @@ subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
 ## Suggested project structure
 
 ```
-cc-beacon/
+session-signals/
 ├─ src/                 # React UI (widget, settings, tray menu views)
 │  ├─ widget/
 │  ├─ settings/

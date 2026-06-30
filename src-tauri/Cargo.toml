@@ -1,11 +1,11 @@
 [package]
 name = "cc-beacon"
 version = "0.3.0"
-description = "Beacon — desktop status indicator for Claude Code"
-authors = ["Beacon contributors"]
+description = "Session Signals — desktop status indicator for Claude Code"
+authors = ["Session Signals contributors"]
 license = "MIT"
-repository = "https://github.com/earsenio/cc-beacon"
-homepage = "https://github.com/earsenio/cc-beacon"
+repository = "https://github.com/earsenio/session-signals"
+homepage = "https://github.com/earsenio/session-signals"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -25,7 +25,7 @@ tauri-build = { version = "2", features = [] }
 # macos-private-api: required for the transparent floating widget window.
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
-# Single-instance guard so only one Beacon owns the listener port.
+# Single-instance guard so only one Session Signals owns the listener port.
 tauri-plugin-single-instance = "2"
 # Persistent JSON store (app config dir) for widget position + view prefs.
 tauri-plugin-store = "2"

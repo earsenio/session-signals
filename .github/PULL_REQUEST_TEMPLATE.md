@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to Beacon! Keep PRs small and focused. -->
+<!-- Thanks for contributing to Session Signals! Keep PRs small and focused. -->
 
 ## Summary
 
@@ -14,4 +14,4 @@
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` pass (in `src-tauri/`)
 - [ ] Added/updated tests for the change where it makes sense
 - [ ] Updated `CHANGELOG.md` (Unreleased) if the change is user-facing
-- [ ] No new telemetry or outbound network calls — Beacon stays fully local
+- [ ] No new telemetry or outbound network calls — Session Signals stays fully local

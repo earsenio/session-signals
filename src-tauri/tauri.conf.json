@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Beacon",
+  "productName": "Session Signals",
   "version": "../package.json",
   "identifier": "com.beacon.cc",
   "build": {
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "settings",
-        "title": "Beacon — Settings",
+        "title": "Session Signals — Settings",
         "width": 460,
         "height": 560,
         "resizable": true,
@@ -40,8 +40,8 @@
     "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "Status indicator for Claude Code sessions",
-    "longDescription": "Beacon is a lightweight menu-bar / system-tray status indicator for Claude Code. A traffic-light icon shows whether any session needs you, is working, or is ready, and a floating always-on-top widget breaks it down per session. Detection is fully local — Claude Code hooks POST to a loopback-only listener; no telemetry, no network egress.",
-    "copyright": "© 2026 Beacon contributors",
+    "longDescription": "Session Signals is a lightweight menu-bar / system-tray status indicator for Claude Code. A traffic-light icon shows whether any session needs you, is working, or is ready, and a floating always-on-top widget breaks it down per session. Detection is fully local — Claude Code hooks POST to a loopback-only listener; no telemetry, no network egress.",
+    "copyright": "© 2026 Session Signals contributors",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

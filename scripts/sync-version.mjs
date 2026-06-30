@@ -22,7 +22,7 @@ const version = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
   console.error(
     `sync-version: package.json version "${version}" is not plain X.Y.Z.\n` +
-      "Beacon is releases-only; pre-release/build tags are not supported.",
+      "Session Signals is releases-only; pre-release/build tags are not supported.",
   );
   process.exit(1);
 }

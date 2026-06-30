@@ -1,6 +1,6 @@
 /* Design tokens — the single source for surfaces, type, spacing, radii, the
    floating-window shadow, and component sizes. Values are literal from the
-   Beacon "Instrument" design sheet. State colors are NOT here: they live in the
+   Session Signals "Instrument" design sheet. State colors are NOT here: they live in the
    theme data (src/themes) and are written to `--state-*` by applyTheme so the
    theme switch is live. Components must reference these vars, never hard-code. */
 

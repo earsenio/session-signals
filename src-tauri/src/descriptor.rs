@@ -1,6 +1,6 @@
 //! Derive a short, human-meaningful session descriptor from a Claude Code
 //! transcript — **locally**, with no network or LLM call (the listener is
-//! loopback-only and Beacon never makes outbound calls; reading a file the user
+//! loopback-only and Session Signals never makes outbound calls; reading a file the user
 //! already owns honors that).
 //!
 //! Source of truth, in priority order, all read from the session's transcript

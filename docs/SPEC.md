@@ -1,4 +1,4 @@
-# Beacon (cc-beacon) — Specification
+# Session Signals — Specification
 
 Single source of truth for requirements. `CLAUDE.md` is the condensed standing
 context; this document is the full version.
@@ -86,7 +86,7 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
 - One-time installer writes the HTTP hook block into `~/.claude/settings.json`,
   merging non-destructively.
 - Copy-paste fallback shown in-app.
-- Clean uninstall that removes only Beacon's hook entries.
+- Clean uninstall that removes only Session Signals' hook entries.
 
 ### 5.6 Themes
 - A theme = an icon set + a state→appearance map, defined as data.

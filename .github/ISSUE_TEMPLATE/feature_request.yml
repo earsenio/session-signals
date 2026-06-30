@@ -1,19 +1,19 @@
 name: Feature request
-description: Suggest an idea or improvement for Beacon
+description: Suggest an idea or improvement for Session Signals
 labels: ["enhancement"]
 body:
   - type: textarea
     id: problem
     attributes:
       label: Problem / motivation
-      description: What are you trying to do that Beacon makes hard or impossible today?
+      description: What are you trying to do that Session Signals makes hard or impossible today?
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposed solution
-      description: What you'd like Beacon to do.
+      description: What you'd like Session Signals to do.
     validations:
       required: true
   - type: textarea
@@ -26,5 +26,5 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: This keeps Beacon fully local — no telemetry, no outbound network calls.
+        - label: This keeps Session Signals fully local — no telemetry, no outbound network calls.
           required: true

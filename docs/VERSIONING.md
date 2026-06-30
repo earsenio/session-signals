@@ -1,6 +1,6 @@
 # Versioning & Releases
 
-Beacon uses [Semantic Versioning](https://semver.org) — `MAJOR.MINOR.PATCH` —
+Session Signals uses [Semantic Versioning](https://semver.org) — `MAJOR.MINOR.PATCH` —
 and ships **releases only** (plain numeric versions, no `-beta` / pre-release
 tags). One version number drives both the macOS (`.app` / `.dmg`) and Windows
 (NSIS `.exe`) installers.
@@ -49,7 +49,7 @@ This single command:
 
 Pushing the tag triggers `.github/workflows/release.yml`, which builds the macOS
 (universal) and Windows bundles and attaches them to a **draft** GitHub Release
-named `Beacon vX.Y.Z`. Review the assets, then publish the release.
+named `Session Signals vX.Y.Z`. Review the assets, then publish the release.
 
 > Requires a clean working tree (`npm version` refuses otherwise). Commit or
 > stash first.

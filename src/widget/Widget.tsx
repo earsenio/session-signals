@@ -133,7 +133,7 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
     session.subagent_count === 1 ? "agent" : "agents"
   } running`;
 
-  // Click-to-focus: only offered when Beacon resolved the owning terminal
+  // Click-to-focus: only offered when Session Signals resolved the owning terminal
   // window (can_focus). A click raises it; if the window vanished since capture,
   // focus_session returns false and we flash a brief "can't focus" hint rather
   // than failing silently. Rows without a resolved window aren't clickable.
@@ -422,7 +422,7 @@ export default function Widget() {
           />
         </span>
         <span className="wTitle" data-tauri-drag-region>
-          Beacon
+          Session Signals
         </span>
         <span className="wHeaderStatus" data-tauri-drag-region title={ROLLUP_LABEL[rollup]}>
           {headerStatus(rollup, sessions)}

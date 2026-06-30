@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 // Bundled fonts (offline — loading from a CDN would be network egress, which
-// Beacon's privacy guardrail forbids). Geist for UI, Geist Mono for code/labels.
+// Session Signals' privacy guardrail forbids). Geist for UI, Geist Mono for code/labels.
 import "@fontsource/geist-sans/latin-400.css";
 import "@fontsource/geist-sans/latin-500.css";
 import "@fontsource/geist-sans/latin-600.css";

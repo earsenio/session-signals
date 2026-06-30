@@ -1,6 +1,6 @@
-# Building & packaging Beacon
+# Building & packaging Session Signals
 
-Beacon is a Tauri 2 app: a Rust shell (tray, windows, hook listener) + a React/
+Session Signals is a Tauri 2 app: a Rust shell (tray, windows, hook listener) + a React/
 Vite frontend. One codebase produces native installers for macOS and Windows.
 
 ## Prerequisites
@@ -33,8 +33,8 @@ This runs `npm run build` (`tsc && vite build`) then bundles. Output lands in
 
 | Platform | Artifacts | Path |
 |---|---|---|
-| macOS | `.app`, `.dmg` | `bundle/macos/Beacon.app`, `bundle/dmg/Beacon_<ver>_<arch>.dmg` |
-| Windows | `.msi`, `.exe` (NSIS) | `bundle/msi/Beacon_<ver>_<arch>_en-US.msi`, `bundle/nsis/Beacon_<ver>_<arch>-setup.exe` |
+| macOS | `.app`, `.dmg` | `bundle/macos/Session Signals.app`, `bundle/dmg/Session Signals_<ver>_<arch>.dmg` |
+| Windows | `.msi`, `.exe` (NSIS) | `bundle/msi/Session Signals_<ver>_<arch>_en-US.msi`, `bundle/nsis/Session Signals_<ver>_<arch>-setup.exe` |
 
 Build on each target OS for that OS's installers (no cross-compilation here).
 
@@ -49,7 +49,7 @@ npm run tauri build -- --bundles nsis msi     # Windows installers only
 
 Set in `src-tauri/tauri.conf.json`:
 
-- `productName: "Beacon"`, `identifier: "com.beacon.cc"`, `version`.
+- `productName: "Session Signals"`, `identifier: "com.beacon.cc"`, `version`.
 - `bundle.icon` — app icons (`.icns` / `.ico` / PNGs in `src-tauri/icons/`).
 - `bundle.category`, `shortDescription`, `longDescription`, `copyright`.
 
@@ -69,15 +69,15 @@ distribution, sign so the OS doesn't warn/block. None of this blocks
       `bundle.macOS.signingIdentity`) so Tauri signs the `.app`/`.dmg`.
 - [ ] Notarize: provide `APPLE_ID`, `APPLE_PASSWORD` (app-specific), and
       `APPLE_TEAM_ID`; Tauri submits to Apple and staples the ticket.
-- [ ] Verify: `spctl -a -vvv Beacon.app` reports *accepted / Notarized*.
-- [ ] Entitlements: Beacon needs no special entitlements (loopback HTTP only).
+- [ ] Verify: `spctl -a -vvv "Session Signals.app"` reports *accepted / Notarized*.
+- [ ] Entitlements: Session Signals needs no special entitlements (loopback HTTP only).
 
 ### Windows
 
 - [ ] Authenticode code-signing certificate (OV/EV; EV avoids SmartScreen warm-up).
 - [ ] Configure `bundle.windows.certificateThumbprint` (+ `signCommand` /
       `timestampUrl`) or sign artifacts in CI with `signtool`.
-- [ ] Verify: `signtool verify /pa Beacon_<ver>_x64-setup.exe`.
+- [ ] Verify: `signtool verify /pa "Session Signals_<ver>_x64-setup.exe"`.
 
 ### Linux (optional)
 

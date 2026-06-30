@@ -157,7 +157,7 @@ pub struct SessionView {
     pub subagent_count: u32,
     /// Seconds since the subagent count rose from 0 (0 when none are running).
     pub subagent_seconds: u64,
-    /// Whether Beacon resolved the owning terminal window — gates the widget's
+    /// Whether Session Signals resolved the owning terminal window — gates the widget's
     /// click-to-focus affordance (no handle ⇒ no focus button).
     pub can_focus: bool,
     /// Short human descriptor of what the session is about (Claude Code's own
@@ -165,7 +165,7 @@ pub struct SessionView {
     pub descriptor: Option<String>,
 }
 
-/// A terminal handle remembered across a Beacon restart. Capture lives only in
+/// A terminal handle remembered across a Session Signals restart. Capture lives only in
 /// memory and only fires on `SessionStart` (see `capture.rs`), so a restart
 /// would otherwise lose click-to-focus for every already-running session until
 /// it happens to start a new turn. `lib.rs` persists these to the store and
@@ -409,7 +409,7 @@ impl Engine {
         let now = Instant::now();
         // A terminal handle remembered across a restart (seeded at startup). It's
         // attached only when this session's row is (re)created or is still
-        // missing a handle — so a Beacon restart keeps click-to-focus for
+        // missing a handle — so a Session Signals restart keeps click-to-focus for
         // already-running sessions, which never re-fire `SessionStart`.
         let remembered = self.pending_captures.get(&ev.session_id).cloned();
         // `from`: Some(prev) on a real change, None on a same-state repeat.
@@ -500,7 +500,7 @@ impl Engine {
         }
     }
 
-    /// The captured terminal pid for a session, if Beacon resolved one. Used by
+    /// The captured terminal pid for a session, if Session Signals resolved one. Used by
     /// the click-to-focus command to know which window to raise.
     pub fn terminal_pid(&self, id: &str) -> Option<i32> {
         self.sessions.get(id).and_then(|s| s.terminal_pid)
@@ -508,7 +508,7 @@ impl Engine {
 
     /// The full focus target for a session: `(pid, tty, app)`. The tty + app let
     /// `focus.rs` select the exact tab on macOS terminals; the pid is the
-    /// app-level fallback. `None` until Beacon captured at least a pid.
+    /// app-level fallback. `None` until Session Signals captured at least a pid.
     pub fn focus_target(&self, id: &str) -> Option<(i32, Option<String>, Option<String>)> {
         self.sessions.get(id).and_then(|s| {
             s.terminal_pid
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn seeded_capture_rehydrates_on_next_event_but_never_conjures_a_row() {
-        // Simulates a Beacon restart: a handle was persisted last run and seeded
+        // Simulates a Session Signals restart: a handle was persisted last run and seeded
         // back in, but the session hasn't emitted anything yet.
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.seed_capture(

@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-Beacon (`cc-beacon`) is distributed under the MIT License (see `LICENSE`). It
+Session Signals is distributed under the MIT License (see `LICENSE`). It
 bundles and depends on third-party components under their own permissive
 licenses. **No dependency requires replacement** — a full transitive audit
 (Rust `cargo metadata`: ~498 crates; npm production tree) found **no
@@ -14,7 +14,7 @@ distribution.
 
 ## Bundled font — Geist Sans & Geist Mono (SIL OFL-1.1)
 
-Beacon bundles the Geist typeface (via the `@fontsource/geist-sans` and
+Session Signals bundles the Geist typeface (via the `@fontsource/geist-sans` and
 `@fontsource/geist-mono` npm packages). The npm *packages* are MIT, but the
 **font files themselves are licensed under the SIL Open Font License v1.1**,
 which requires its copyright + license notice to be redistributed with the

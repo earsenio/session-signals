@@ -184,10 +184,10 @@ fn icon_for(palette: &TrayPalette, rollup: Rollup) -> Image<'static> {
 
 fn tooltip_for(rollup: Rollup) -> &'static str {
     match rollup {
-        Rollup::Red => "Beacon — a session needs you",
-        Rollup::Orange => "Beacon — working",
-        Rollup::Green => "Beacon — ready",
-        Rollup::Grey => "Beacon — no live sessions",
+        Rollup::Red => "Session Signals — a session needs you",
+        Rollup::Orange => "Session Signals — working",
+        Rollup::Green => "Session Signals — ready",
+        Rollup::Grey => "Session Signals — no live sessions",
     }
 }
 
@@ -225,8 +225,8 @@ pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let uninstall = MenuItem::with_id(app, "uninstall", "Uninstall hooks", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Open Beacon…", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Beacon", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Open Session Signals…", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Session Signals", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;

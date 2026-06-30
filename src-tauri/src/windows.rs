@@ -61,7 +61,7 @@ impl Default for WidgetPrefs {
 }
 
 /// Create the widget window at startup and show it only if it was visible when
-/// Beacon last ran. The window always exists (so it can receive events); hiding
+/// Session Signals last ran. The window always exists (so it can receive events); hiding
 /// is just a visibility toggle.
 pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let prefs = load_prefs(app);
@@ -80,7 +80,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 /// can place it before the first paint).
 fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, WIDGET_LABEL, WebviewUrl::App("index.html".into()))
-        .title("Beacon")
+        .title("Session Signals")
         .inner_size(DEFAULT_W, DEFAULT_H)
         // Starting min for the expanded view; `apply_size` swaps this per mode
         // (a collapsed pill needs a far smaller floor — see COMPACT_MIN_W).
@@ -94,7 +94,7 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .visible(false)
         .build()?;
 
-    // Persist position on drag; closing the widget just hides it (Beacon keeps
+    // Persist position on drag; closing the widget just hides it (Session Signals keeps
     // running in the tray).
     let app2 = app.clone();
     window.on_window_event(move |event| match event {

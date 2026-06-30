@@ -1,4 +1,4 @@
-//! Beacon — desktop status indicator for Claude Code.
+//! Session Signals — desktop status indicator for Claude Code.
 //!
 //! The Rust shell owns the source of truth (the state engine), the localhost
 //! hook listener, the tray, and now configuration + notifications. The webviews
@@ -35,7 +35,7 @@ const SWEEP_INTERVAL_SECS: u64 = 15;
 
 /// Store file (shared with `windows.rs`) and the key under which captured
 /// terminal handles are persisted: `{ session_id: { pid, app, tty } }`. They are
-/// rehydrated at startup so click-to-focus survives a Beacon restart even though
+/// rehydrated at startup so click-to-focus survives a Session Signals restart even though
 /// the capture hook only fires on `SessionStart`.
 const STORE_FILE: &str = "beacon.json";
 const KEY_CAPTURES: &str = "captures";
@@ -88,7 +88,7 @@ fn forget_capture(app: &AppHandle, session_id: &str) {
 /// Seed remembered terminal handles into the engine at startup. They attach to a
 /// session only when a real hook event recreates its row, so this can never
 /// resurrect a phantom session — it just restores click-to-focus for sessions
-/// that are still running when Beacon comes back up.
+/// that are still running when Session Signals comes back up.
 fn seed_captures(app: &AppHandle) {
     let Ok(store) = app.store(STORE_FILE) else {
         return;
@@ -167,7 +167,7 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
         eng.apply(&ev)
     };
     // Persist (or forget) the terminal handle so click-to-focus survives a
-    // Beacon restart — the capture hook itself only fires on `SessionStart`.
+    // Session Signals restart — the capture hook itself only fires on `SessionStart`.
     match ev.hook_event_name.as_str() {
         "BeaconTerminal" if ev.terminal_pid.is_some() => persist_capture(app, &ev),
         "SessionEnd" => forget_capture(app, &ev.session_id),
@@ -273,7 +273,7 @@ fn current_token(app: &AppHandle) -> String {
         .clone()
 }
 
-/// Install Beacon's hooks for an explicit port + token, (re)writing the terminal
+/// Install Session Signals' hooks for an explicit port + token, (re)writing the terminal
 /// capture script first so the `SessionStart` command hook targets that listener.
 /// Capture is best-effort: if the script can't be written, the http hooks still
 /// install (click-to-focus simply won't be available). Takes the port/token
@@ -349,7 +349,7 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
             }
             *guard = Some(server);
         }
-        // Keep settings.json pointed at the new port — but only if Beacon's
+        // Keep settings.json pointed at the new port — but only if Session Signals'
         // hooks are actually installed (don't install just because port changed).
         if hooks::is_installed() {
             install_beacon_hooks_for(&app, new.port, &current_token(&app))?;
@@ -436,7 +436,7 @@ fn endpoint(app: AppHandle) -> String {
     hooks::endpoint(current_port(&app))
 }
 
-/// Raise the terminal window that owns `session_id`, if Beacon captured it.
+/// Raise the terminal window that owns `session_id`, if Session Signals captured it.
 /// Returns whether a window was resolved and a raise attempted — the widget uses
 /// this to flash a "can't focus" hint on a false. Never errors/panics.
 #[tauri::command]
@@ -517,7 +517,7 @@ pub fn run() {
         // surfaces the existing settings window instead of fighting over the
         // listener port.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Same hardened path as the tray's "Open Beacon…" so a relaunch can
+            // Same hardened path as the tray's "Open Session Signals…" so a relaunch can
             // never surface a stale/blank settings webview either.
             tray::show_settings(app);
         }))
@@ -608,7 +608,7 @@ pub fn run() {
             // Keep the OS autostart entry in sync with the saved preference.
             let _ = set_autostart(&handle, cfg.launch_on_login);
 
-            // Startup hook health: if Beacon's hooks are installed but carry a
+            // Startup hook health: if Session Signals' hooks are installed but carry a
             // stale/absent auth-token header (e.g. after upgrading to a
             // token-enforcing build over pre-token hooks), the listener would
             // 401 every event and silently track nothing. Auto-repair by
@@ -632,7 +632,7 @@ pub fn run() {
             // Create the floating widget (shown only if it was visible last run).
             windows::init(&handle)?;
 
-            // Closing the settings window hides it rather than quitting Beacon.
+            // Closing the settings window hides it rather than quitting Session Signals.
             if let Some(window) = app.get_webview_window("settings") {
                 let w = window.clone();
                 window.on_window_event(move |event| {
@@ -642,8 +642,8 @@ pub fn run() {
                     }
                 });
 
-                // First-run / not-set-up flow: if Beacon's hooks aren't installed
-                // yet, Beacon can't detect anything — so surface the settings
+                // First-run / not-set-up flow: if Session Signals' hooks aren't installed
+                // yet, Session Signals can't detect anything — so surface the settings
                 // window (which shows the install banner) instead of sitting as a
                 // silent grey tray icon the user can't act on.
                 if !hooks::is_installed() {
@@ -709,7 +709,7 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Beacon");
+        .expect("error while running Session Signals");
 }
 
 /// Fire an "went idle" notification (used only when `notify_idle` is enabled).
@@ -718,7 +718,7 @@ fn notify_idle(app: &AppHandle, label: &str) {
     let _ = app
         .notification()
         .builder()
-        .title("Beacon")
+        .title("Session Signals")
         .body(format!("{label} went idle"))
         .show();
 }
