@@ -287,8 +287,26 @@ fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
-fn show_settings(app: &AppHandle) {
+pub(crate) fn show_settings(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
+        // Dev-mode self-heal. In `tauri dev` the settings window points at the
+        // Vite dev server and is kept hidden between opens. If that webview is
+        // ever left holding a dead page — Vite was down when it first tried to
+        // load, Vite restarted, or an HMR full reload fired while it was hidden
+        // — it presents blank when next shown (and can take the always-on-top
+        // widget's transparent webview down with it when both are stale: the
+        // "settings hides the widget" report). `reload()` is not enough: it only
+        // re-runs the *current* document, so a webview whose initial navigation
+        // failed has nothing live to reload and stays blank. Re-navigating to
+        // the configured dev URL forces a fresh fetch, recovering even a
+        // never-loaded webview. Release builds serve static bundled assets that
+        // can't go stale, so this is compiled out there — no flash in production.
+        #[cfg(debug_assertions)]
+        if let Some(dev_url) = app.config().build.dev_url.clone() {
+            let _ = window.navigate(dev_url);
+        } else {
+            let _ = window.reload();
+        }
         let _ = window.show();
         let _ = window.set_focus();
     }

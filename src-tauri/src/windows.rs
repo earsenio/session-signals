@@ -124,6 +124,16 @@ fn position_window(app: &AppHandle, window: &WebviewWindow) {
 pub fn show(app: &AppHandle) {
     match app.get_webview_window(WIDGET_LABEL) {
         Some(window) => {
+            // Dev-mode self-heal, mirroring the settings window (see
+            // `tray::show_settings`). The transparent widget renders nothing when
+            // its webview is dead, so a stale/never-loaded page reads as "the
+            // widget vanished". `reload()` can't recover a webview whose initial
+            // navigation failed, so re-navigate to the dev URL to force a fresh
+            // fetch. Compiled out of release builds, which serve static assets.
+            #[cfg(debug_assertions)]
+            if let Some(dev_url) = app.config().build.dev_url.clone() {
+                let _ = window.navigate(dev_url);
+            }
             let _ = window.show();
             let _ = window.set_focus();
         }

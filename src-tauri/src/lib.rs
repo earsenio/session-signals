@@ -517,10 +517,9 @@ pub fn run() {
         // surfaces the existing settings window instead of fighting over the
         // listener port.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("settings") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // Same hardened path as the tray's "Open Beacon…" so a relaunch can
+            // never surface a stale/blank settings webview either.
+            tray::show_settings(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
