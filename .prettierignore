@@ -1,0 +1,18 @@
+# Build output & deps
+dist/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+
+# Generated / vendored
+package-lock.json
+
+# Rust is formatted by rustfmt, not Prettier
+*.rs
+
+# Markdown/prose is left to the author (Prettier here is a code formatter for
+# the TS/CSS/JSON frontend; docs like CLAUDE.md and SPEC.md stay as written).
+*.md
+
+# Docs internal scratch (gitignored anyway)
+docs/internal/

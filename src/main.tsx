@@ -23,9 +23,11 @@ function resolveLabel(): string {
   try {
     // `__TAURI_INTERNALS__` carries the current window's metadata. Reading it
     // avoids an async import and works the moment the script runs.
-    const internals = (window as unknown as {
-      __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
-    }).__TAURI_INTERNALS__;
+    const internals = (
+      window as unknown as {
+        __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+      }
+    ).__TAURI_INTERNALS__;
     return internals?.metadata?.currentWindow?.label ?? "settings";
   } catch {
     return "settings";

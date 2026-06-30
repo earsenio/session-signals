@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Frontend dependencies (package.json / package-lock.json).
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+
+  # Rust shell (src-tauri/Cargo.toml).
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+
+  # GitHub Actions used by the CI and Release workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies"]

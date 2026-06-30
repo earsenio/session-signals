@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in Beacon isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug! ⚠️ For **security** issues, do **not** open a public
+        issue — see [SECURITY.md](https://github.com/earsenio/cc-beacon/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS & version
+      placeholder: "macOS 14.5 / Windows 11 23H2"
+    validations:
+      required: true
+  - type: input
+    id: beacon-version
+    attributes:
+      label: Beacon version
+      description: Shown in the settings window (tray → Open Beacon…).
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: cc-version
+    attributes:
+      label: Claude Code version
+      placeholder: "output of `claude --version`"
+  - type: textarea
+    id: extra
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Tray/widget screenshots or terminal output, if relevant. Beacon is
+        local-only — nothing is uploaded anywhere on your behalf.

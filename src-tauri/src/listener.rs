@@ -48,12 +48,10 @@ where
     std::thread::Builder::new()
         .name("beacon-listener".into())
         .spawn(move || {
-            // `recv` unblocks (returns Err) when `unblock` is called on a swap.
-            loop {
-                match worker.recv() {
-                    Ok(request) => handle(request, &auth, &on_event, &state_json),
-                    Err(_) => break,
-                }
+            // `recv` unblocks (returns Err) when `unblock` is called on a swap,
+            // ending the loop.
+            while let Ok(request) = worker.recv() {
+                handle(request, &auth, &on_event, &state_json);
             }
         })?;
 
@@ -208,9 +206,16 @@ mod tests {
         let port = bound_port(&server);
 
         // A real hook reaches the callback.
-        post_hook(port, r#"{"hook_event_name":"SessionStart","session_id":"x"}"#);
+        post_hook(
+            port,
+            r#"{"hook_event_name":"SessionStart","session_id":"x"}"#,
+        );
         std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(count.load(Ordering::SeqCst), 1, "callback should have run once");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "callback should have run once"
+        );
 
         // Binding the same port again is refused while it's in use.
         let busy = start(port, auth(TEST_TOKEN), |_e| {}, || "{}".to_string());
@@ -221,7 +226,11 @@ mod tests {
         drop(server);
         std::thread::sleep(Duration::from_millis(150));
         let rebound = start(port, auth(TEST_TOKEN), |_e| {}, || "{}".to_string());
-        assert!(rebound.is_ok(), "rebind after release should succeed: {:?}", rebound.err());
+        assert!(
+            rebound.is_ok(),
+            "rebind after release should succeed: {:?}",
+            rebound.err()
+        );
     }
 
     /// A request with a missing or wrong token must be rejected and reach the
@@ -249,7 +258,11 @@ mod tests {
         // Wrong token → rejected too.
         post_hook_with_token(port, body, "nope");
         std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(count.load(Ordering::SeqCst), 0, "bad token must alter nothing");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "bad token must alter nothing"
+        );
 
         // Correct token → accepted.
         post_hook_with_token(port, body, TEST_TOKEN);
@@ -261,10 +274,18 @@ mod tests {
         *tok.lock().unwrap() = "rotated-token".to_string();
         post_hook_with_token(port, body, TEST_TOKEN);
         std::thread::sleep(Duration::from_millis(120));
-        assert_eq!(count.load(Ordering::SeqCst), 1, "old token rejected after rotate");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "old token rejected after rotate"
+        );
         post_hook_with_token(port, body, "rotated-token");
         std::thread::sleep(Duration::from_millis(120));
-        assert_eq!(count.load(Ordering::SeqCst), 2, "new token accepted after rotate");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            2,
+            "new token accepted after rotate"
+        );
 
         server.unblock();
     }

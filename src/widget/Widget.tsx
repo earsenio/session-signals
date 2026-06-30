@@ -13,7 +13,8 @@ import {
 } from "../state/types";
 import { useTheme } from "../themes/useTheme";
 import type { ThemePalette } from "../themes";
-import { shapeForRollup, shapeForState, StateGlyph } from "../components/StateGlyph";
+import { StateGlyph } from "../components/StateGlyph";
+import { shapeForRollup, shapeForState } from "../components/glyphShape";
 import "./Widget.css";
 
 /// m:ss for the first hour, h:mm:ss beyond — matches the design's "0:08", "14:03".
@@ -62,7 +63,9 @@ function useEngineState() {
       setBaseAt(Date.now());
     };
     const sync = () => {
-      invoke<SessionsPayload>("get_snapshot").then(apply).catch(() => {});
+      invoke<SessionsPayload>("get_snapshot")
+        .then(apply)
+        .catch(() => {});
     };
 
     // Low-latency path: apply every engine push the instant it arrives.
@@ -281,7 +284,9 @@ function CompactPill({
         p.dragging = true;
         document.removeEventListener("mousemove", move);
         document.removeEventListener("mouseup", up);
-        getCurrentWindow().startDragging().catch(() => {});
+        getCurrentWindow()
+          .startDragging()
+          .catch(() => {});
       }
     };
     const up = () => {
@@ -299,12 +304,7 @@ function CompactPill({
   }, [onExpand]);
 
   return (
-    <div
-      className="wPill"
-      onMouseDown={onMouseDown}
-      onClick={onClick}
-      title="Click to expand"
-    >
+    <div className="wPill" onMouseDown={onMouseDown} onClick={onClick} title="Click to expand">
       <div className="wPillInner" ref={innerRef}>
         <svg className="wGrip" width="7" height="16" viewBox="0 0 7 16" aria-hidden="true">
           <circle cx="1.5" cy="3" r="1.4" />
@@ -428,11 +428,7 @@ export default function Widget() {
           {headerStatus(rollup, sessions)}
         </span>
         <span className="wHeaderSpacer" data-tauri-drag-region />
-        <button
-          className="wIconBtn"
-          onClick={toggleCompact}
-          title={compact ? "Expand" : "Compact"}
-        >
+        <button className="wIconBtn" onClick={toggleCompact} title={compact ? "Expand" : "Compact"}>
           <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="5" cy="12" r="2" />
             <circle cx="12" cy="12" r="2" />

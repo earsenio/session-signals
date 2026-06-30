@@ -2,7 +2,10 @@
 name = "cc-beacon"
 version = "0.2.0"
 description = "Beacon — desktop status indicator for Claude Code"
-authors = ["Beacon"]
+authors = ["Beacon contributors"]
+license = "MIT"
+repository = "https://github.com/earsenio/cc-beacon"
+homepage = "https://github.com/earsenio/cc-beacon"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

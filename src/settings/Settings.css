@@ -164,7 +164,9 @@ code {
   height: 16px;
   border-radius: 50%;
   background: #9398a0;
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
 }
 
 .sToggle.on .sToggleKnob {

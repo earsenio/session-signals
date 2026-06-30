@@ -20,7 +20,6 @@ mod windows;
 use config::Config;
 use engine::{CapturedTerminal, Engine, HookEvent, Rollup, SessionView, Transition};
 use notify::Notifier;
-use tray::TrayPalette;
 use serde::Serialize;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -28,6 +27,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_store::StoreExt;
 use tiny_http::Server;
+use tray::TrayPalette;
 use windows::WidgetPrefs;
 
 /// How often the background sweep checks for stale sessions.
@@ -48,7 +48,9 @@ fn persist_capture(app: &AppHandle, ev: &HookEvent) {
     };
     let mut map = store
         .get(KEY_CAPTURES)
-        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok())
+        .and_then(|v| {
+            serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok()
+        })
         .unwrap_or_default();
     map.insert(
         ev.session_id.clone(),
@@ -70,10 +72,9 @@ fn forget_capture(app: &AppHandle, session_id: &str) {
     let Ok(store) = app.store(STORE_FILE) else {
         return;
     };
-    let Some(mut map) = store
-        .get(KEY_CAPTURES)
-        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok())
-    else {
+    let Some(mut map) = store.get(KEY_CAPTURES).and_then(|v| {
+        serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok()
+    }) else {
         return;
     };
     if map.remove(session_id).is_some() {
@@ -92,10 +93,9 @@ fn seed_captures(app: &AppHandle) {
     let Ok(store) = app.store(STORE_FILE) else {
         return;
     };
-    let Some(map) = store
-        .get(KEY_CAPTURES)
-        .and_then(|v| serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok())
-    else {
+    let Some(map) = store.get(KEY_CAPTURES).and_then(|v| {
+        serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok()
+    }) else {
         return;
     };
     let state = app.state::<AppState>();
@@ -517,10 +517,9 @@ pub fn run() {
         // surfaces the existing settings window instead of fighting over the
         // listener port.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("settings") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // Same hardened path as the tray's "Open Beacon…" so a relaunch can
+            // never surface a stale/blank settings webview either.
+            tray::show_settings(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -618,10 +617,7 @@ pub fn run() {
             // the first-run flow below.
             if hooks::is_installed() && hooks::needs_token_repair(&current_token(&handle)) {
                 match install_beacon_hooks(&handle) {
-                    Ok(p) => eprintln!(
-                        "beacon: repaired stale hook auth token in {}",
-                        p.display()
-                    ),
+                    Ok(p) => eprintln!("beacon: repaired stale hook auth token in {}", p.display()),
                     Err(e) => eprintln!("beacon: could not repair stale hooks: {e}"),
                 }
             }
@@ -664,11 +660,14 @@ pub fn run() {
             seed_captures(&handle);
 
             // Start the localhost hook listener on the configured port.
-            let server = spawn_listener(&handle, cfg.port).map_err(
-                |e| -> Box<dyn std::error::Error> {
-                    format!("failed to bind hook listener on 127.0.0.1:{}: {e}", cfg.port).into()
-                },
-            )?;
+            let server =
+                spawn_listener(&handle, cfg.port).map_err(|e| -> Box<dyn std::error::Error> {
+                    format!(
+                        "failed to bind hook listener on 127.0.0.1:{}: {e}",
+                        cfg.port
+                    )
+                    .into()
+                })?;
             *handle
                 .state::<AppState>()
                 .listener

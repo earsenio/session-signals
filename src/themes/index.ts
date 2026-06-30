@@ -16,9 +16,7 @@ export const THEME_LIST: Theme[] = [classic, dusk];
 
 export const DEFAULT_THEME_ID = classic.id;
 
-const BY_ID: Record<string, Theme> = Object.fromEntries(
-  THEME_LIST.map((t) => [t.id, t]),
-);
+const BY_ID: Record<string, Theme> = Object.fromEntries(THEME_LIST.map((t) => [t.id, t]));
 
 /// Look up a theme by id, falling back to the default for unknown/old ids.
 export function getTheme(id: string | undefined): Theme {

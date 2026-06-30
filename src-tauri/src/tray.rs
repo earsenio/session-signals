@@ -118,10 +118,20 @@ fn signed_distance(shape: Shape, px: f32, py: f32, scale: f32) -> f32 {
         }
         Shape::Check => {
             let d = dist_segment(
-                px, py, 5.0 * scale, 12.6 * scale, 10.0 * scale, 17.4 * scale,
+                px,
+                py,
+                5.0 * scale,
+                12.6 * scale,
+                10.0 * scale,
+                17.4 * scale,
             )
             .min(dist_segment(
-                px, py, 10.0 * scale, 17.4 * scale, 19.3 * scale, 6.8 * scale,
+                px,
+                py,
+                10.0 * scale,
+                17.4 * scale,
+                19.3 * scale,
+                6.8 * scale,
             ));
             d - 1.6 * scale // half of the 3.2 stroke
         }
@@ -164,7 +174,11 @@ pub fn encode_png(rgba: &[u8], size: u32) -> Option<Vec<u8>> {
 
 /// Build the tray glyph for a rollup from the given palette.
 fn icon_for(palette: &TrayPalette, rollup: Rollup) -> Image<'static> {
-    let buf = render_glyph_rgba(shape_for_rollup(rollup), palette.rollup_rgb(rollup), TRAY_SIZE);
+    let buf = render_glyph_rgba(
+        shape_for_rollup(rollup),
+        palette.rollup_rgb(rollup),
+        TRAY_SIZE,
+    );
     Image::new_owned(buf, TRAY_SIZE, TRAY_SIZE)
 }
 
@@ -203,9 +217,14 @@ pub fn save_palette(app: &AppHandle, palette: &TrayPalette) {
 /// Build the tray icon and menu. Starts grey (no sessions yet), using `palette`.
 pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
     let widget = MenuItem::with_id(app, "widget", "Show / hide widget", true, None::<&str>)?;
-    let install = MenuItem::with_id(app, "install", "Install Claude Code hooks", true, None::<&str>)?;
-    let uninstall =
-        MenuItem::with_id(app, "uninstall", "Uninstall hooks", true, None::<&str>)?;
+    let install = MenuItem::with_id(
+        app,
+        "install",
+        "Install Claude Code hooks",
+        true,
+        None::<&str>,
+    )?;
+    let uninstall = MenuItem::with_id(app, "uninstall", "Uninstall hooks", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Open Beacon…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Beacon", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -268,8 +287,26 @@ fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
-fn show_settings(app: &AppHandle) {
+pub(crate) fn show_settings(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("settings") {
+        // Dev-mode self-heal. In `tauri dev` the settings window points at the
+        // Vite dev server and is kept hidden between opens. If that webview is
+        // ever left holding a dead page — Vite was down when it first tried to
+        // load, Vite restarted, or an HMR full reload fired while it was hidden
+        // — it presents blank when next shown (and can take the always-on-top
+        // widget's transparent webview down with it when both are stale: the
+        // "settings hides the widget" report). `reload()` is not enough: it only
+        // re-runs the *current* document, so a webview whose initial navigation
+        // failed has nothing live to reload and stays blank. Re-navigating to
+        // the configured dev URL forces a fresh fetch, recovering even a
+        // never-loaded webview. Release builds serve static bundled assets that
+        // can't go stale, so this is compiled out there — no flash in production.
+        #[cfg(debug_assertions)]
+        if let Some(dev_url) = app.config().build.dev_url.clone() {
+            let _ = window.navigate(dev_url);
+        } else {
+            let _ = window.reload();
+        }
         let _ = window.show();
         let _ = window.set_focus();
     }

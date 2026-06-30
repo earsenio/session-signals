@@ -1,0 +1,77 @@
+name: CI
+
+# Validates every PR and every push to main: frontend lint/typecheck/build on
+# Linux, and the Rust shell (fmt + clippy + tests + a compile smoke) on the two
+# shipping targets, macOS and Windows. The release workflow (release.yml) stays
+# tag-triggered and separate.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same ref cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint · typecheck · build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Prettier (check)
+        run: npm run format:check
+      - name: ESLint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build frontend
+        run: npm run build
+
+  rust:
+    name: Rust shell (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The Tauri app crate embeds the built frontend via generate_context!, so
+      # `dist/` must exist before the Rust crate will compile (clippy/test/build).
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build frontend (provides dist/ for the Tauri context)
+        run: npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Rustfmt (check)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build (compile smoke)
+        run: cargo build --manifest-path src-tauri/Cargo.toml

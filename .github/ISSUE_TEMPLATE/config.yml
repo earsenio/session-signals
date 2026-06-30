@@ -1,0 +1,6 @@
+# Keep the blank-issue option, but route security reports to the private channel.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/earsenio/cc-beacon/security/advisories/new
+    about: Please report security issues privately, not as a public issue (see SECURITY.md).

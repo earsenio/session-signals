@@ -49,14 +49,19 @@ pub fn render_icons(app: &AppHandle, palette: &TrayPalette) {
     };
     let _ = std::fs::create_dir_all(&dir);
     for (state, rgb, shape) in [
-        (State::NeedsYou, palette.needs_you, crate::tray::Shape::Square),
+        (
+            State::NeedsYou,
+            palette.needs_you,
+            crate::tray::Shape::Square,
+        ),
         (State::Working, palette.working, crate::tray::Shape::Dot),
         (State::Ready, palette.ready, crate::tray::Shape::Check),
     ] {
         let rgba = crate::tray::render_glyph_rgba(shape, rgb, NOTIF_ICON_SIZE);
-        if let (Some(png), Some(path)) =
-            (crate::tray::encode_png(&rgba, NOTIF_ICON_SIZE), icon_path(app, state))
-        {
+        if let (Some(png), Some(path)) = (
+            crate::tray::encode_png(&rgba, NOTIF_ICON_SIZE),
+            icon_path(app, state),
+        ) {
             let _ = std::fs::write(path, png);
         }
     }
@@ -126,7 +131,10 @@ impl Notifier {
         let project = t.label.split(" (").next().unwrap_or(&t.label).to_string();
         let (title, body) = match t.to {
             State::NeedsYou => (format!("{project} needs you"), "Waiting for your input."),
-            State::Working => (format!("{project} is working"), "Running — don’t interrupt."),
+            State::Working => (
+                format!("{project} is working"),
+                "Running — don’t interrupt.",
+            ),
             State::Ready => (format!("{project} is ready"), "Finished — your turn."),
         };
         let sound = if pref.sound {
