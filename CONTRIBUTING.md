@@ -70,6 +70,40 @@ npm run release:patch   # or release:minor / release:major
 Full details: [docs/VERSIONING.md](docs/VERSIONING.md). Note user-facing changes
 in [CHANGELOG.md](CHANGELOG.md) under **Unreleased**.
 
+## Releasing
+
+Releases are automated by `.github/workflows/release.yml` (maintainers only).
+
+1. Move the **Unreleased** notes in [CHANGELOG.md](CHANGELOG.md) under the new
+   version heading, then commit.
+2. From a clean working tree, bump + tag + push in one step:
+   ```bash
+   npm run release:patch   # or release:minor / release:major
+   ```
+   This bumps `package.json`, syncs `Cargo.toml`/`Cargo.lock`, creates the
+   `vX.Y.Z` commit and tag, and pushes both (the `postversion` hook).
+3. The pushed tag triggers the **Release** workflow. It builds the macOS
+   (universal `.dmg`) and Windows (`.msi`/`.exe`) installers with
+   [`tauri-action`](https://github.com/tauri-apps/tauri-action) and uploads them
+   to a **draft** GitHub Release named `Beacon vX.Y.Z`.
+4. Review the attached installers, then **publish** the draft Release.
+
+To (re)build an existing tag without re-tagging, dispatch the workflow manually:
+
+```bash
+gh workflow run release.yml --ref main -f tag=vX.Y.Z
+```
+
+> Heads-up (tauri-action v1): if a **non-draft** Release already exists for the
+> tag, the workflow fails rather than editing it — delete or re-draft that
+> Release before re-running.
+
+**Signing.** Installers currently ship **unsigned** (users do a one-time
+right-click → Open on macOS / "Run anyway" on Windows). To sign, add the cert
+secrets and uncomment the relevant `env:` block in `release.yml` — see the
+current Tauri docs for [macOS](https://v2.tauri.app/distribute/sign/macos/) and
+[Windows](https://v2.tauri.app/distribute/sign/windows/).
+
 ## Reporting bugs & ideas
 
 Open a GitHub issue with steps to reproduce, your OS, the Beacon version, and
