@@ -1,6 +1,6 @@
 [package]
 name = "cc-beacon"
-version = "0.2.0"
+version = "0.3.0"
 description = "Beacon — desktop status indicator for Claude Code"
 authors = ["Beacon contributors"]
 license = "MIT"
