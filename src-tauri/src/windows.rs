@@ -256,6 +256,41 @@ pub fn set_compact_width(app: &AppHandle, width: f64) {
     }
 }
 
+/// Auto-fit the expanded window's height to the rendered content. The webview
+/// measures its natural content height (capped to ~10 session rows) and calls
+/// this whenever that changes — sessions added/removed, or a row growing/
+/// shrinking (e.g. a subagent activity sub-line appearing). No-op while collapsed
+/// (a late call arriving after the user collapsed is ignored). The width is left
+/// untouched; height is clamped to the expanded floor and the current monitor's
+/// usable height so the widget never grows past the screen. The fitted height is
+/// persisted so the next expand/restart restores it before the first paint.
+pub fn set_expanded_height(app: &AppHandle, height: f64) {
+    if load_prefs(app).compact {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
+        let (w, _) = logical_inner(&window);
+        let max_h = max_widget_height(&window);
+        let h = height.clamp(EXPANDED_MIN_H, max_h);
+        let _ = window.set_size(LogicalSize::new(w, h));
+        store_f64(app, KEY_EXPANDED_W, w);
+        store_f64(app, KEY_EXPANDED_H, h);
+    }
+}
+
+/// Usable height ceiling for the expanded widget: the current monitor's height
+/// minus a margin (menu bar / dock), floored at the expanded minimum. Keeps the
+/// auto-fit from ever exceeding the screen even at the full 10-row cap.
+fn max_widget_height(window: &WebviewWindow) -> f64 {
+    if let Ok(Some(mon)) = window.current_monitor() {
+        let scale = mon.scale_factor();
+        let h = mon.size().height as f64 / scale;
+        (h - 80.0).max(EXPANDED_MIN_H)
+    } else {
+        DEFAULT_H
+    }
+}
+
 /// The window's current inner size in logical (DPI-independent) px. Falls back
 /// to the defaults if the platform query fails.
 fn logical_inner(window: &WebviewWindow) -> (f64, f64) {

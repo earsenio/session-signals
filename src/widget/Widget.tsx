@@ -38,6 +38,12 @@ function splitLabel(label: string): { folder: string; branch: string | null } {
 /// width when sizing the collapsed window so the pill hugs its glyphs.
 const PILL_PAD_X = 26;
 
+/// The expanded window auto-fits its height to this many session rows; beyond
+/// it, `.wBody` scrolls. Rows vary in height (a subagent sub-line makes one
+/// taller), so the cap is measured from the first N rendered rows, not a fixed
+/// pixel height.
+const MAX_VISIBLE_ROWS = 10;
+
 /// Row state text per the design (richer than the tray tooltips).
 const ROW_STATE_TEXT: Record<SessionState, string> = {
   needs_you: "Needs your input",
@@ -365,6 +371,8 @@ export default function Widget() {
   const [compact, setCompact] = useState(false);
   const [opacity, setOpacity] = useState(0.95);
   const [port, setPort] = useState<number | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     invoke<WidgetPrefs>("widget_prefs")
@@ -395,6 +403,57 @@ export default function Widget() {
     invoke("widget_hide").catch(() => {});
   }, []);
 
+  // Auto-fit the expanded window height to the rendered content (up to
+  // MAX_VISIBLE_ROWS rows; beyond that `.wBody` scrolls). Re-measures whenever
+  // the session set changes and — via a ResizeObserver on the rows — whenever a
+  // row grows or shrinks (a subagent activity sub-line or descriptor appearing),
+  // so the window reflows without waiting for the next session change. Collapsed
+  // mode manages its own size, so this is inert there.
+  const sessionsKey = sessions.map((s) => s.session_id).join("|");
+  useLayoutEffect(() => {
+    if (compact) return;
+    const root = rootRef.current;
+    const body = bodyRef.current;
+    if (!root || !body) return;
+
+    const fit = () => {
+      const inner = body.firstElementChild as HTMLElement | null;
+      if (!inner) return;
+      let content: number;
+      if (inner.classList.contains("wList")) {
+        // Sum each row's own height (not the container's): rows never flex-grow,
+        // so this is the true natural list height and shrinks correctly when a
+        // row or session is removed. Cap to the first N rows for the max size.
+        const heights = Array.from(inner.children).map(
+          (r) => (r as HTMLElement).getBoundingClientRect().height,
+        );
+        const natural = heights.reduce((a, b) => a + b, 0);
+        const capped = heights.slice(0, MAX_VISIBLE_ROWS).reduce((a, b) => a + b, 0);
+        content = Math.min(natural, capped);
+      } else {
+        // Empty state: fit to the message block's natural height.
+        content = inner.getBoundingClientRect().height;
+      }
+      // chrome = header + divider + footer (everything but the scrolling body),
+      // which is invariant to content, so this stays correct across re-measures.
+      const chrome = root.clientHeight - body.clientHeight;
+      const height = Math.ceil(chrome + content);
+      invoke("widget_set_expanded_height", { height }).catch(() => {});
+    };
+
+    fit();
+
+    const inner = body.firstElementChild;
+    const ro = new ResizeObserver(fit);
+    if (inner) {
+      ro.observe(inner);
+      Array.from(inner.children).forEach((c) => ro.observe(c));
+    }
+    return () => ro.disconnect();
+    // sessionsKey re-runs the effect (re-observing new rows) when sessions are
+    // added/removed; intra-row height changes are caught by the observer.
+  }, [compact, sessionsKey]);
+
   const rollupShape = shapeForRollup(rollup);
   const rollupColor = rollup === "grey" ? palette.stale : palette.rollups[rollup];
 
@@ -411,7 +470,7 @@ export default function Widget() {
   }
 
   return (
-    <div className="widget" style={{ "--widget-opacity": opacity } as CSSProperties}>
+    <div className="widget" ref={rootRef} style={{ "--widget-opacity": opacity } as CSSProperties}>
       <header className="wHeader" data-tauri-drag-region>
         <span className="wHeaderGlyph" data-tauri-drag-region>
           <StateGlyph
@@ -446,15 +505,17 @@ export default function Widget() {
 
       <div className="wDivider" />
 
-      {sessions.length === 0 ? (
-        <EmptyBody palette={palette} />
-      ) : (
-        <ul className="wList">
-          {sessions.map((s) => (
-            <ExpandedRow key={s.session_id} session={s} palette={palette} />
-          ))}
-        </ul>
-      )}
+      <div className="wBody" ref={bodyRef}>
+        {sessions.length === 0 ? (
+          <EmptyBody palette={palette} />
+        ) : (
+          <ul className="wList">
+            {sessions.map((s) => (
+              <ExpandedRow key={s.session_id} session={s} palette={palette} />
+            ))}
+          </ul>
+        )}
+      </div>
 
       <footer className="wFooter">
         <span className="wFootItem">LISTENING · :{port ?? "—"}</span>

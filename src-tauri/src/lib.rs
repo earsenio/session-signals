@@ -474,6 +474,11 @@ fn widget_set_compact_width(app: AppHandle, width: f64) {
 }
 
 #[tauri::command]
+fn widget_set_expanded_height(app: AppHandle, height: f64) {
+    windows::set_expanded_height(&app, height);
+}
+
+#[tauri::command]
 fn widget_set_opacity(app: AppHandle, opacity: f64) {
     windows::set_opacity(&app, opacity);
 }
@@ -561,6 +566,7 @@ pub fn run() {
             widget_prefs,
             widget_set_compact,
             widget_set_compact_width,
+            widget_set_expanded_height,
             widget_set_opacity,
             widget_show,
             widget_hide,
