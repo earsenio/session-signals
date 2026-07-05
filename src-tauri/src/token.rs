@@ -27,7 +27,7 @@ pub const HEADER: &str = "X-Beacon-Token";
 /// unlikely, and still better than a fixed string.
 pub fn generate() -> String {
     let mut bytes = [0u8; 32];
-    if getrandom::getrandom(&mut bytes).is_err() {
+    if getrandom::fill(&mut bytes).is_err() {
         // Degraded fallback: still 32 varied bytes, not a constant.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
