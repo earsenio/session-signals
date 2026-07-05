@@ -336,9 +336,9 @@ export default function Settings() {
             </button>
           </div>
           <p className="sHookNote">
-            Session Signals detects sessions via hooks that POST to <code>{endpoint}</code>. Each hook
-            carries a private token (the <code>X-Beacon-Token</code> header) so only Session Signals’ own
-            hooks can report state — other local programs are rejected.
+            Session Signals detects sessions via hooks that POST to <code>{endpoint}</code>. Each
+            hook carries a private token (the <code>X-Beacon-Token</code> header) so only Session
+            Signals’ own hooks can report state — other local programs are rejected.
           </p>
           <div className="sHookBtns">
             <button className="sBtn" onClick={regenerateToken}>
@@ -494,8 +494,9 @@ function Onboarding({
       </div>
       <h1 className="sOnboardTitle">One quick setup</h1>
       <p className="sOnboardDesc">
-        Session Signals watches your Claude Code sessions through a small hook in its config. Add it once and
-        Session Signals will know the moment a session needs you, starts working, or finishes its turn.
+        Session Signals watches your Claude Code sessions through a small hook in its config. Add it
+        once and Session Signals will know the moment a session needs you, starts working, or
+        finishes its turn.
       </p>
       <button className="sOnboardBtn" onClick={onInstall}>
         Set up automatically
@@ -505,7 +506,8 @@ function Onboarding({
       </button>
       <pre className="sCode sOnboardCode">{hookBlock}</pre>
       <p className="sOnboardFoot">
-        Session Signals only appends its hook · reversible anytime below · no code leaves your machine
+        Session Signals only appends its hook · reversible anytime below · no code leaves your
+        machine
       </p>
     </section>
   );

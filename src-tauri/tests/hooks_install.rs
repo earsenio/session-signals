@@ -82,7 +82,10 @@ fn install_then_uninstall_is_non_destructive() {
         .iter()
         .filter(|g| g["hooks"][0]["url"] == "http://127.0.0.1:4317/hook")
         .count();
-    assert_eq!(beacon_on_stop, 1, "reinstall duplicated Session Signals hook");
+    assert_eq!(
+        beacon_on_stop, 1,
+        "reinstall duplicated Session Signals hook"
+    );
 
     // Uninstall removes only ours.
     hooks::uninstall(4317).expect("uninstall ok");
