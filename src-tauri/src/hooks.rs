@@ -1,15 +1,15 @@
-//! Hook installer: merge Beacon's HTTP hooks into `~/.claude/settings.json`
+//! Hook installer: merge Session Signals' HTTP hooks into `~/.claude/settings.json`
 //! without disturbing the user's other hooks, and remove only ours on
 //! uninstall.
 //!
-//! Beacon's hook entries are identified structurally — an `http` hook whose URL
+//! Session Signals' hook entries are identified structurally — an `http` hook whose URL
 //! points at our loopback `/hook` endpoint — so we never need to write a custom
 //! marker into the user's settings, and uninstall is precise.
 
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
-/// Hook events Beacon wires up. These drive the state engine (see CLAUDE.md).
+/// Hook events Session Signals wires up. These drive the state engine (see CLAUDE.md).
 /// Grouped by the role each plays in the state machine (see `engine::apply`):
 /// session lifecycle, work-start (→ Working), heartbeats (keep Working), and
 /// terminal (→ Ready / NeedsYou). Verified against Claude Code 2.1.195; all
@@ -72,7 +72,7 @@ fn our_group(port: u16, token: &str) -> Value {
     })
 }
 
-/// The full `{ "hooks": { ... } }` block Beacon installs — used both for the
+/// The full `{ "hooks": { ... } }` block Session Signals installs — used both for the
 /// copy-paste fallback and as the source of truth for the merge.
 pub fn hook_block_value(port: u16, token: &str) -> Value {
     let mut hooks = Map::new();
@@ -88,7 +88,7 @@ pub fn hook_block_string(port: u16, token: &str) -> String {
         .unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Is this individual hook object one of Beacon's? We recognize two shapes
+/// Is this individual hook object one of Session Signals'? We recognize two shapes
 /// structurally (no marker written into the user's file):
 /// - an `http` hook posting to our loopback `/hook` endpoint, and
 /// - the `command` capture hook, whose command contains the `beacon-capture`
@@ -126,7 +126,7 @@ fn capture_group(command: &str) -> Value {
     })
 }
 
-/// Strip Beacon's hooks out of one event's array of groups, in place. Drops a
+/// Strip Session Signals' hooks out of one event's array of groups, in place. Drops a
 /// group entirely only if it had *nothing but* our hooks. Returns whether the
 /// array ended up empty (so the caller can remove the key).
 fn strip_our_hooks(groups: &mut Vec<Value>) {
@@ -175,7 +175,7 @@ fn write_settings(path: &PathBuf, settings: &Map<String, Value>) -> Result<(), S
     std::fs::write(path, body + "\n").map_err(|e| format!("could not write settings.json: {e}"))
 }
 
-/// Are any of Beacon's hooks currently present in settings.json? Port-agnostic
+/// Are any of Session Signals' hooks currently present in settings.json? Port-agnostic
 /// (our hooks are identified structurally), so this stays true across a port
 /// change until an explicit uninstall.
 pub fn is_installed() -> bool {
@@ -208,14 +208,14 @@ pub fn is_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Do Beacon's installed http hooks carry an auth-token header that doesn't match
+/// Do Session Signals' installed http hooks carry an auth-token header that doesn't match
 /// `token` (missing, or a stale value)? When true, the token-enforcing listener
 /// 401s every one of these hooks and silently tracks nothing — exactly the
 /// breakage an upgrade to a token build causes when it leaves pre-token hooks in
 /// place. Used at startup to decide whether to auto-repair.
 ///
 /// Only our `http` hooks are checked: the capture `command` hook (also ours)
-/// intentionally carries no header. Returns false when Beacon has no http hooks
+/// intentionally carries no header. Returns false when Session Signals has no http hooks
 /// installed (the not-installed case is handled by the first-run flow) or when
 /// every one already matches.
 pub fn needs_token_repair(token: &str) -> bool {
@@ -259,7 +259,7 @@ pub fn needs_token_repair(token: &str) -> bool {
     false
 }
 
-/// Merge Beacon's hooks into settings.json. Idempotent: any prior Beacon hooks
+/// Merge Session Signals' hooks into settings.json. Idempotent: any prior Session Signals hooks
 /// are removed first, then our fresh block is added. Other hooks untouched.
 pub fn install(port: u16, token: &str, capture_cmd: Option<&str>) -> Result<PathBuf, String> {
     let path = settings_path()?;
@@ -279,7 +279,7 @@ pub fn install(port: u16, token: &str, capture_cmd: Option<&str>) -> Result<Path
         let groups = arr
             .as_array_mut()
             .ok_or_else(|| format!("settings.json hooks.{ev} is not an array"))?;
-        // Remove any stale Beacon entries (http *and* the capture command), then
+        // Remove any stale Session Signals entries (http *and* the capture command), then
         // add the current ones.
         strip_our_hooks(groups);
         groups.push(our_group(port, token));
@@ -296,7 +296,7 @@ pub fn install(port: u16, token: &str, capture_cmd: Option<&str>) -> Result<Path
     Ok(path)
 }
 
-/// Remove only Beacon's hook entries, leaving the rest of settings.json intact
+/// Remove only Session Signals' hook entries, leaving the rest of settings.json intact
 /// and valid. Empty event arrays and an empty `hooks` object are cleaned up.
 pub fn uninstall(_port: u16) -> Result<PathBuf, String> {
     let path = settings_path()?;
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn token_repair_detects_missing_and_mismatched_headers() {
-        // A pre-token Beacon http hook (no headers) — the exact stale shape an
+        // A pre-token Session Signals http hook (no headers) — the exact stale shape an
         // upgrade leaves behind.
         let stale: Value = serde_json::from_str(
             r#"{ "type": "http", "url": "http://127.0.0.1:4317/hook", "timeout": 10 }"#,

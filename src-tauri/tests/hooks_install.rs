@@ -30,7 +30,7 @@ fn install_then_uninstall_is_non_destructive() {
     let dir = sandbox("install");
     let settings = dir.join(".claude").join("settings.json");
 
-    // Install Beacon's hooks, including the terminal-capture command hook.
+    // Install Session Signals' hooks, including the terminal-capture command hook.
     let capture = "sh '/tmp/beacon-capture.sh'";
     hooks::install(4317, "tok-xyz", Some(capture)).expect("install ok");
     let v: Value =
@@ -73,7 +73,7 @@ fn install_then_uninstall_is_non_destructive() {
         "capture command hook missing on SessionStart"
     );
 
-    // Re-install must be idempotent (no duplicate Beacon entries on Stop).
+    // Re-install must be idempotent (no duplicate Session Signals entries on Stop).
     hooks::install(4317, "tok-xyz", Some(capture)).expect("reinstall ok");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     let beacon_on_stop = v["hooks"]["Stop"]
@@ -82,7 +82,10 @@ fn install_then_uninstall_is_non_destructive() {
         .iter()
         .filter(|g| g["hooks"][0]["url"] == "http://127.0.0.1:4317/hook")
         .count();
-    assert_eq!(beacon_on_stop, 1, "reinstall duplicated Beacon hook");
+    assert_eq!(
+        beacon_on_stop, 1,
+        "reinstall duplicated Session Signals hook"
+    );
 
     // Uninstall removes only ours.
     hooks::uninstall(4317).expect("uninstall ok");
@@ -91,7 +94,7 @@ fn install_then_uninstall_is_non_destructive() {
     let stop = v["hooks"]["Stop"].as_array().unwrap();
     assert_eq!(stop.len(), 1);
     assert_eq!(stop[0]["hooks"][0]["type"], "command");
-    // Events that were purely Beacon's are gone.
+    // Events that were purely Session Signals' are gone.
     assert!(v["hooks"].get("SessionStart").is_none());
 
     let _ = std::fs::remove_dir_all(&dir);

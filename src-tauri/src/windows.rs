@@ -61,7 +61,7 @@ impl Default for WidgetPrefs {
 }
 
 /// Create the widget window at startup and show it only if it was visible when
-/// Beacon last ran. The window always exists (so it can receive events); hiding
+/// Session Signals last ran. The window always exists (so it can receive events); hiding
 /// is just a visibility toggle.
 pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let prefs = load_prefs(app);
@@ -80,7 +80,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 /// can place it before the first paint).
 fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, WIDGET_LABEL, WebviewUrl::App("index.html".into()))
-        .title("Beacon")
+        .title("Session Signals")
         .inner_size(DEFAULT_W, DEFAULT_H)
         // Starting min for the expanded view; `apply_size` swaps this per mode
         // (a collapsed pill needs a far smaller floor — see COMPACT_MIN_W).
@@ -94,7 +94,7 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .visible(false)
         .build()?;
 
-    // Persist position on drag; closing the widget just hides it (Beacon keeps
+    // Persist position on drag; closing the widget just hides it (Session Signals keeps
     // running in the tray).
     let app2 = app.clone();
     window.on_window_event(move |event| match event {
@@ -253,6 +253,41 @@ pub fn set_compact_width(app: &AppHandle, width: f64) {
     if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
         let w = width.clamp(COMPACT_MIN_W, DEFAULT_W);
         let _ = window.set_size(LogicalSize::new(w, COMPACT_H));
+    }
+}
+
+/// Auto-fit the expanded window's height to the rendered content. The webview
+/// measures its natural content height (capped to ~10 session rows) and calls
+/// this whenever that changes — sessions added/removed, or a row growing/
+/// shrinking (e.g. a subagent activity sub-line appearing). No-op while collapsed
+/// (a late call arriving after the user collapsed is ignored). The width is left
+/// untouched; height is clamped to the expanded floor and the current monitor's
+/// usable height so the widget never grows past the screen. The fitted height is
+/// persisted so the next expand/restart restores it before the first paint.
+pub fn set_expanded_height(app: &AppHandle, height: f64) {
+    if load_prefs(app).compact {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
+        let (w, _) = logical_inner(&window);
+        let max_h = max_widget_height(&window);
+        let h = height.clamp(EXPANDED_MIN_H, max_h);
+        let _ = window.set_size(LogicalSize::new(w, h));
+        store_f64(app, KEY_EXPANDED_W, w);
+        store_f64(app, KEY_EXPANDED_H, h);
+    }
+}
+
+/// Usable height ceiling for the expanded widget: the current monitor's height
+/// minus a margin (menu bar / dock), floored at the expanded minimum. Keeps the
+/// auto-fit from ever exceeding the screen even at the full 10-row cap.
+fn max_widget_height(window: &WebviewWindow) -> f64 {
+    if let Ok(Some(mon)) = window.current_monitor() {
+        let scale = mon.scale_factor();
+        let h = mon.size().height as f64 / scale;
+        (h - 80.0).max(EXPANDED_MIN_H)
+    } else {
+        DEFAULT_H
     }
 }
 

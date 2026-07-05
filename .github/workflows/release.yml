@@ -86,7 +86,7 @@ jobs:
           # `bundle.windows.trustedSigning`.
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: "Beacon ${{ inputs.tag || github.ref_name }}"
+          releaseName: "Session Signals ${{ inputs.tag || github.ref_name }}"
           releaseBody: "Download the installer for your platform below."
           # Draft so a human reviews the assets before publishing. NOTE (tauri-action
           # v1): if a NON-draft release already exists for this tag, the action fails

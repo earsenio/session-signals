@@ -1,6 +1,6 @@
 # Security Policy
 
-Beacon (`cc-beacon`) is a fully-local desktop app: no telemetry, no outbound
+Session Signals is a fully-local desktop app: no telemetry, no outbound
 network calls, ever. It nonetheless has a few local surfaces worth an explicit
 threat model, because it runs a loopback HTTP listener and edits
 `~/.claude/settings.json`.
@@ -10,7 +10,7 @@ threat model, because it runs a loopback HTTP listener and edits
 **Please do not open a public issue for security problems.**
 
 - Preferred: use GitHub's **private vulnerability reporting** —
-  [Report a vulnerability](https://github.com/earsenio/cc-beacon/security/advisories/new)
+  [Report a vulnerability](https://github.com/earsenio/session-signals/security/advisories/new)
   (Security → Advisories → "Report a vulnerability"). This keeps the report
   private until a fix is available.
 
@@ -21,8 +21,8 @@ disclosure regardless.
 
 ## Supported versions
 
-Beacon is pre-1.0. Security fixes land on the latest release line; please verify
-against the newest [release](https://github.com/earsenio/cc-beacon/releases)
+Session Signals is pre-1.0. Security fixes land on the latest release line; please verify
+against the newest [release](https://github.com/earsenio/session-signals/releases)
 before reporting.
 
 ## Threat model
@@ -54,18 +54,18 @@ before reporting.
 
 ### 3. Writing to `~/.claude/settings.json`
 
-- **Implementation:** a **non-destructive merge** — Beacon's hooks are identified
+- **Implementation:** a **non-destructive merge** — Session Signals' hooks are identified
   *structurally* (an HTTP hook to the loopback `/hook`, or the `command` capture
   hook carrying the `beacon-capture` marker), never by clobbering unrelated keys.
   A **one-time backup** is written to `settings.json.beacon.bak` before any
-  change. Uninstall strips only Beacon's entries and prunes emptied arrays. A
+  change. Uninstall strips only Session Signals' entries and prunes emptied arrays. A
   present-but-unparseable settings file is refused, not overwritten.
-- **Residual risk:** Beacon also installs a **`command` hook**
+- **Residual risk:** Session Signals also installs a **`command` hook**
   (`beacon-capture.sh` / `.ps1`) that runs on `SessionStart`. It is auto-generated
   into app-data and registered to run; it walks the process tree to find the
   owning terminal (for click-to-focus) and POSTs only
   `{terminal_pid, terminal_app, tty}` to the loopback listener. It is removed on
-  uninstall. This is the most surprising thing Beacon does to a security
+  uninstall. This is the most surprising thing Session Signals does to a security
   reviewer, so it is called out explicitly.
 
 ### 4. Webview content security

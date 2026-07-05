@@ -1,6 +1,6 @@
 # Themes
 
-A theme in Beacon is **pure data** — a color map, nothing else. The *shape* of
+A theme in Session Signals is **pure data** — a color map, nothing else. The *shape* of
 each state's indicator (square / dot / check / ring) is fixed in `StateGlyph`
 and shared by every theme; a theme only swaps colors. The same data drives the
 React glyphs *and* the native menu-bar/tray icon (Rust renders the shapes from

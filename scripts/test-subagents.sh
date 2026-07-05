@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Surface 9 (subagent activity) UI test driver.
 #
-# Drives Beacon's local hook listener directly so you can watch the widget react
-# without needing real Claude Code subagents. Open and EXPAND the Beacon widget
+# Drives Session Signals' local hook listener directly so you can watch the widget react
+# without needing real Claude Code subagents. Open and EXPAND the Session Signals widget
 # first — the sub-line only renders in expanded rows, not the compact pill.
 #
 # Usage:  bash scripts/test-subagents.sh [port]   (default port 4317)
@@ -22,7 +22,7 @@ state() { curl -s "http://127.0.0.1:${PORT}/state" \
 pause() { echo "   ⏸  $1"; sleep "${2:-3}"; }
 
 if ! curl -s -m 2 "http://127.0.0.1:${PORT}/state" >/dev/null; then
-  echo "No Beacon listener on 127.0.0.1:${PORT}. Start Beacon (npm run tauri dev) first." >&2
+  echo "No Session Signals listener on 127.0.0.1:${PORT}. Start Session Signals (npm run tauri dev) first." >&2
   exit 1
 fi
 

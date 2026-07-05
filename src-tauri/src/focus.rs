@@ -8,14 +8,14 @@
 //! - [`frontmost_pid`] — the pid of whichever app currently owns the foreground.
 //!
 //! Tab precision: on macOS, scriptable terminals (Terminal.app, iTerm2) expose a
-//! per-tab `tty`, so if Beacon captured the session's tty we select that exact
+//! per-tab `tty`, so if Session Signals captured the session's tty we select that exact
 //! tab via AppleScript rather than merely raising the app — the difference
 //! between landing on the right session and landing on whatever tab happened to
 //! be active. Unknown terminals, a tmux pane, an IDE-integrated terminal, and
 //! all of Windows fall back to the app-level raise. Everything degrades
 //! gracefully — an unresolvable target yields `false`, never a panic.
 
-/// Everything Beacon captured about where a session lives, enough to focus it.
+/// Everything Session Signals captured about where a session lives, enough to focus it.
 /// `tty`/`app` are best-effort; `pid` (the terminal app) is the floor.
 pub struct FocusTarget {
     pub pid: i32,
@@ -113,7 +113,7 @@ pub fn raise_pid(pid: i32) -> bool {
     // Two-step, because macOS 14+ (Sonoma) tightened cross-app activation:
     //
     // 1. NSRunningApplication.activate — cheap, needs no special permission, and
-    //    is enough when Beacon itself is active. But from a background process it
+    //    is enough when Session Signals itself is active. But from a background process it
     //    often *won't* pull another app forward (the deprecated
     //    `IgnoringOtherApps` flag is now a no-op), so on its own it's unreliable.
     // 2. System Events via AppleScript (`set frontmost … to true`), which raises

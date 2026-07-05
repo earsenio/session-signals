@@ -2,11 +2,11 @@
 //! row click can raise it (Feature 2).
 //!
 //! We can't get a window handle from a hook payload — only `session_id` + `cwd`.
-//! So at install time Beacon writes a small per-OS script and registers it as a
+//! So at install time Session Signals writes a small per-OS script and registers it as a
 //! `SessionStart` **command** hook. When a session starts, Claude Code runs the
 //! script; it reads the hook JSON on stdin, walks the parent-process chain up to
 //! the top-level terminal application, and POSTs `{terminal_pid, terminal_app}`
-//! back to Beacon's listener (carrying the auth token) as a synthetic
+//! back to Session Signals' listener (carrying the auth token) as a synthetic
 //! `BeaconTerminal` event. The engine stores the pid on the session; `focus.rs`
 //! later raises that pid's window.
 //!
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 /// Marker substring present in both the script filename and the command-hook
-/// string, used by the installer to identify Beacon's capture hook.
+/// string, used by the installer to identify Session Signals' capture hook.
 pub const MARKER: &str = "beacon-capture";
 
 #[cfg(windows)]
@@ -31,7 +31,7 @@ const SCRIPT_NAME: &str = "beacon-capture.sh";
 /// (pid 1), so walking up until the parent is pid ≤ 1 lands on the terminal app.
 #[cfg(not(windows))]
 const SCRIPT_TEMPLATE: &str = r#"#!/bin/sh
-# Beacon terminal-capture hook (auto-generated — do not edit).
+# Session Signals terminal-capture hook (auto-generated — do not edit).
 PORT=__PORT__
 TOKEN=__TOKEN__
 payload=$(cat)
@@ -70,7 +70,7 @@ exit 0
 /// terminal app. App-level only: a specific Windows Terminal *tab* isn't
 /// addressable portably.
 #[cfg(windows)]
-const SCRIPT_TEMPLATE: &str = r#"# Beacon terminal-capture hook (auto-generated - do not edit).
+const SCRIPT_TEMPLATE: &str = r#"# Session Signals terminal-capture hook (auto-generated - do not edit).
 $ErrorActionPreference = 'SilentlyContinue'
 $port = __PORT__
 $token = '__TOKEN__'
@@ -100,7 +100,7 @@ try {
 exit 0
 "#;
 
-/// Absolute path of the capture script in Beacon's app-data dir.
+/// Absolute path of the capture script in Session Signals' app-data dir.
 fn script_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()

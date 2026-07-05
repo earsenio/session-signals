@@ -285,7 +285,7 @@ export default function Settings() {
           <div className="sRow">
             <div className="sRowText">
               <span className="sRowTitle">Launch at login</span>
-              <span className="sRowHint">Start Beacon quietly in the tray</span>
+              <span className="sRowHint">Start Session Signals quietly in the tray</span>
             </div>
             <Toggle checked={cfg.launch_on_login} onChange={(v) => patch({ launch_on_login: v })} />
           </div>
@@ -336,9 +336,9 @@ export default function Settings() {
             </button>
           </div>
           <p className="sHookNote">
-            Beacon detects sessions via hooks that POST to <code>{endpoint}</code>. Each hook
-            carries a private token (the <code>X-Beacon-Token</code> header) so only Beacon’s own
-            hooks can report state — other local programs are rejected.
+            Session Signals detects sessions via hooks that POST to <code>{endpoint}</code>. Each
+            hook carries a private token (the <code>X-Beacon-Token</code> header) so only Session
+            Signals’ own hooks can report state — other local programs are rejected.
           </p>
           <div className="sHookBtns">
             <button className="sBtn" onClick={regenerateToken}>
@@ -354,7 +354,7 @@ export default function Settings() {
       </Section>
 
       <footer className="sFooter">
-        <span className="sVersion">Beacon{appVersion ? ` v${appVersion}` : ""}</span>
+        <span className="sVersion">Session Signals{appVersion ? ` v${appVersion}` : ""}</span>
       </footer>
 
       {status && <div className={`sToast ${status.kind}`}>{status.msg}</div>}
@@ -494,8 +494,9 @@ function Onboarding({
       </div>
       <h1 className="sOnboardTitle">One quick setup</h1>
       <p className="sOnboardDesc">
-        Beacon watches your Claude Code sessions through a small hook in its config. Add it once and
-        Beacon will know the moment a session needs you, starts working, or finishes its turn.
+        Session Signals watches your Claude Code sessions through a small hook in its config. Add it
+        once and Session Signals will know the moment a session needs you, starts working, or
+        finishes its turn.
       </p>
       <button className="sOnboardBtn" onClick={onInstall}>
         Set up automatically
@@ -505,7 +506,8 @@ function Onboarding({
       </button>
       <pre className="sCode sOnboardCode">{hookBlock}</pre>
       <p className="sOnboardFoot">
-        Beacon only appends its hook · reversible anytime below · no code leaves your machine
+        Session Signals only appends its hook · reversible anytime below · no code leaves your
+        machine
       </p>
     </section>
   );

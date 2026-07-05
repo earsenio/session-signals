@@ -117,15 +117,27 @@ body {
   background: var(--hairline-soft);
 }
 
+/* --- Expanded body --- */
+/* Scroll region between header and footer. The window auto-fits its height to
+   the content (up to 10 rows; see Widget.tsx), so this only scrolls past the
+   cap. `min-height: 0` lets it shrink inside the flex column. */
+.wBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
 /* --- Expanded list --- */
+/* Natural height (no `flex: 1`) so its measured size is the true content height
+   the window fits to; `.wBody` owns the scrolling. */
 .wList {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  flex: 1;
 }
 
 .wRow {
@@ -306,8 +318,8 @@ body {
 }
 
 /* --- Empty state --- */
+/* Natural height (no `flex: 1`) so the window auto-fits to the message. */
 .wEmpty {
-  flex: 1;
   padding: var(--sp-7) 24px 32px;
   display: flex;
   flex-direction: column;

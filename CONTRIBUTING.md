@@ -1,12 +1,12 @@
-# Contributing to Beacon
+# Contributing to Session Signals
 
-Thanks for your interest in improving Beacon! This is a small, fully-local
+Thanks for your interest in improving Session Signals! This is a small, fully-local
 desktop app — contributions that keep it lightweight, private, and well-tested
 are very welcome.
 
 ## Ground rules
 
-- **Stay local.** Beacon makes **no outbound network calls** and has no
+- **Stay local.** Session Signals makes **no outbound network calls** and has no
   telemetry. If a change would add one, it won't be merged. The only network
   surface is the inbound loopback listener.
 - **Engine is the source of truth.** State flows one way: the Rust engine derives
@@ -59,7 +59,7 @@ update tests alongside your change.
 
 ## Versioning
 
-Beacon uses SemVer, releases-only. **`package.json` is the single source of
+Session Signals uses SemVer, releases-only. **`package.json` is the single source of
 truth** — never hand-edit the version in `tauri.conf.json` or `Cargo.toml`. Bump
 via:
 
@@ -85,7 +85,7 @@ Releases are automated by `.github/workflows/release.yml` (maintainers only).
 3. The pushed tag triggers the **Release** workflow. It builds the macOS
    (universal `.dmg`) and Windows (`.msi`/`.exe`) installers with
    [`tauri-action`](https://github.com/tauri-apps/tauri-action) and uploads them
-   to a **draft** GitHub Release named `Beacon vX.Y.Z`.
+   to a **draft** GitHub Release named `Session Signals vX.Y.Z`.
 4. Review the attached installers, then **publish** the draft Release.
 
 To (re)build an existing tag without re-tagging, dispatch the workflow manually:
@@ -106,7 +106,7 @@ current Tauri docs for [macOS](https://v2.tauri.app/distribute/sign/macos/) and
 
 ## Reporting bugs & ideas
 
-Open a GitHub issue with steps to reproduce, your OS, the Beacon version, and
+Open a GitHub issue with steps to reproduce, your OS, the Session Signals version, and
 (for detection issues) which hook events you expected. For **security** issues,
 do **not** open a public issue — see [SECURITY.md](SECURITY.md).
 

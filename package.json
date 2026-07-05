@@ -2,16 +2,16 @@
   "name": "cc-beacon",
   "private": true,
   "version": "0.3.0",
-  "description": "Beacon — a lightweight, fully-local desktop status indicator for Claude Code.",
+  "description": "Session Signals — a lightweight, fully-local desktop status indicator for Claude Code.",
   "license": "MIT",
-  "author": "Beacon contributors",
+  "author": "Session Signals contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/earsenio/cc-beacon.git"
+    "url": "https://github.com/earsenio/session-signals.git"
   },
-  "homepage": "https://github.com/earsenio/cc-beacon#readme",
+  "homepage": "https://github.com/earsenio/session-signals#readme",
   "bugs": {
-    "url": "https://github.com/earsenio/cc-beacon/issues"
+    "url": "https://github.com/earsenio/session-signals/issues"
   },
   "type": "module",
   "scripts": {
@@ -49,7 +49,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^17.7.0",
-    "prettier": "^3.9.3",
+    "prettier": "^3.9.4",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.62.1",
     "vite": "^7.0.4"

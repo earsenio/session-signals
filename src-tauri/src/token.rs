@@ -1,9 +1,9 @@
 //! Listener auth token.
 //!
-//! A random secret shared between Beacon and the hooks it installs. Every hook
+//! A random secret shared between Session Signals and the hooks it installs. Every hook
 //! POST must carry it as the `X-Beacon-Token` header; the listener rejects any
 //! request that doesn't match (see `listener.rs`). This stops *other* local
-//! processes from spoofing session state into Beacon — loopback binding alone
+//! processes from spoofing session state into Session Signals — loopback binding alone
 //! doesn't, since any local program can reach `127.0.0.1`.
 //!
 //! The token is generated once on first run and persisted in the same
