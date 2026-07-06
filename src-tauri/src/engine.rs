@@ -1595,7 +1595,11 @@ mod tests {
             folder, "myrepo",
             "worktree shows main repo name, not the worktree folder name"
         );
-        assert_eq!(branch.as_deref(), Some("feature-x"), "resolves the worktree's own branch");
+        assert_eq!(
+            branch.as_deref(),
+            Some("feature-x"),
+            "resolves the worktree's own branch"
+        );
         assert!(wt, "flagged as a worktree");
 
         let _ = fs::remove_dir_all(&base);
