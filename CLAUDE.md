@@ -196,3 +196,33 @@ All four are **complete**; this is the historical roadmap, kept for context:
 (The original per-phase `/goal` build prompts are no longer tracked in the
 published tree; any internal scratch lives under `docs/internal/`, which is
 gitignored.)
+
+## Parallel session conventions
+
+This repo is frequently worked on by multiple concurrent Claude Code sessions that could be
+running in separate git worktrees. Follow these rules.
+
+### Branch & commit hygiene
+- Always work on a dedicated task branch, never directly on `main`.
+- Pull/rebase from `main` before starting edits.
+- Commit in small, logical units, and commit often — don't leave a large
+  uncommitted working set.
+- Keep each change scoped to its task. Do not opportunistically refactor or
+  reformat unrelated files.
+
+### No repo-wide sweeps
+- Do not run project-wide formatters, `lint --fix` across the whole tree,
+  codemods, or mass find-and-replace without flagging it first. These create
+  merge conflicts across every other active session.
+- If a broad change is genuinely needed, stop and ask before running it.
+
+### Runtime state is not isolated by the worktree
+- Do not assume exclusive use of the default database, ports, or services.
+- Use this worktree's own `.env`/config. If you need a database, use an
+  isolated schema or container — never run destructive migrations against a
+  shared default DB.
+
+### Scope ownership (only when sharing a single checkout, not worktrees)
+- If you've been assigned a specific area, edit only files under that path:
+  <!-- e.g. this session owns src/api/ only -->
+- Treat files outside your assigned scope as read-only.
