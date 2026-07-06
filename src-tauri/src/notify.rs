@@ -9,6 +9,7 @@
 use crate::config::Config;
 use crate::engine::{State, Transition};
 use crate::tray::TrayPalette;
+use crate::LockExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -112,7 +113,7 @@ impl Notifier {
         let key = format!("{}:{:?}", t.session_id, t.to);
         {
             let now = Instant::now();
-            let mut recent = self.recent.lock().expect("notifier mutex poisoned");
+            let mut recent = self.recent.lock_safe();
             if let Some(&last) = recent.get(&key) {
                 if now.duration_since(last) < DEBOUNCE {
                     return;

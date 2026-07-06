@@ -33,6 +33,22 @@ use windows::WidgetPrefs;
 /// How often the background sweep checks for stale sessions.
 const SWEEP_INTERVAL_SECS: u64 = 15;
 
+/// `Mutex::lock` that recovers from poisoning instead of panicking. One
+/// panicking lock-holder must not permanently poison state for every other
+/// thread — a poisoned engine mutex would leave the app looking alive while
+/// tracking nothing. Every critical section here is small and leaves the data
+/// consistent, so continuing with the recovered guard is safe.
+pub(crate) trait LockExt<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Store file (shared with `windows.rs`) and the key under which captured
 /// terminal handles are persisted: `{ session_id: { pid, app, tty } }`. They are
 /// rehydrated at startup so click-to-focus survives a Session Signals restart even though
@@ -99,7 +115,7 @@ fn seed_captures(app: &AppHandle) {
         return;
     };
     let state = app.state::<AppState>();
-    let mut eng = state.engine.lock().expect("engine mutex poisoned");
+    let mut eng = state.engine.lock_safe();
     for (id, cap) in map {
         eng.seed_capture(id, cap);
     }
@@ -137,14 +153,14 @@ struct SessionsPayload {
 fn refresh(app: &AppHandle) {
     let state = app.state::<AppState>();
     let payload = {
-        let eng = state.engine.lock().expect("engine mutex poisoned");
+        let eng = state.engine.lock_safe();
         SessionsPayload {
             rollup: eng.rollup(),
             sessions: eng.snapshot(),
         }
     };
     {
-        let palette = *state.tray_palette.lock().expect("palette mutex poisoned");
+        let palette = *state.tray_palette.lock_safe();
         tray::set_rollup(app, payload.rollup, &palette);
     }
     let _ = app.emit("sessions-updated", payload);
@@ -153,7 +169,7 @@ fn refresh(app: &AppHandle) {
 /// React to a state transition: fire a notification per the user's config.
 fn on_transition(app: &AppHandle, t: &Transition) {
     let state = app.state::<AppState>();
-    let cfg = state.config.lock().expect("config mutex poisoned").clone();
+    let cfg = state.config.lock_safe().clone();
     state.notifier.fire(app, &cfg, t);
 }
 
@@ -163,7 +179,7 @@ fn on_transition(app: &AppHandle, t: &Transition) {
 fn process_event(app: &AppHandle, ev: HookEvent) {
     let outcome = {
         let state = app.state::<AppState>();
-        let mut eng = state.engine.lock().expect("engine mutex poisoned");
+        let mut eng = state.engine.lock_safe();
         eng.apply(&ev)
     };
     // Persist (or forget) the terminal handle so click-to-focus survives a
@@ -210,7 +226,7 @@ fn maybe_refresh_descriptor(app: &AppHandle, ev: &HookEvent) -> bool {
     let force = ev.hook_event_name == "UserPromptSubmit";
     if !force {
         let due = {
-            let eng = state.engine.lock().expect("engine mutex poisoned");
+            let eng = state.engine.lock_safe();
             eng.descriptor_due(
                 &ev.session_id,
                 Duration::from_secs(DESCRIPTOR_RETRY_SECS),
@@ -223,7 +239,7 @@ fn maybe_refresh_descriptor(app: &AppHandle, ev: &HookEvent) -> bool {
     }
     // Bounded transcript read — lock intentionally NOT held here.
     let value = descriptor::extract(path);
-    let mut eng = state.engine.lock().expect("engine mutex poisoned");
+    let mut eng = state.engine.lock_safe();
     eng.set_descriptor(&ev.session_id, value)
 }
 
@@ -245,7 +261,7 @@ fn spawn_listener(app: &AppHandle, port: u16) -> std::io::Result<Arc<Server>> {
         },
         move || {
             let state = state_handle.state::<AppState>();
-            let eng = state.engine.lock().expect("engine mutex poisoned");
+            let eng = state.engine.lock_safe();
             let payload = SessionsPayload {
                 rollup: eng.rollup(),
                 sessions: eng.snapshot(),
@@ -257,20 +273,12 @@ fn spawn_listener(app: &AppHandle, port: u16) -> std::io::Result<Arc<Server>> {
 
 /// The port currently configured.
 fn current_port(app: &AppHandle) -> u16 {
-    app.state::<AppState>()
-        .config
-        .lock()
-        .expect("config mutex poisoned")
-        .port
+    app.state::<AppState>().config.lock_safe().port
 }
 
 /// The current listener auth token.
 fn current_token(app: &AppHandle) -> String {
-    app.state::<AppState>()
-        .token
-        .lock()
-        .expect("token mutex poisoned")
-        .clone()
+    app.state::<AppState>().token.lock_safe().clone()
 }
 
 /// Install Session Signals' hooks for an explicit port + token, (re)writing the terminal
@@ -297,7 +305,7 @@ fn install_beacon_hooks(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 
 #[tauri::command]
 fn get_snapshot(state: State<AppState>) -> SessionsPayload {
-    let eng = state.engine.lock().expect("engine mutex poisoned");
+    let eng = state.engine.lock_safe();
     SessionsPayload {
         rollup: eng.rollup(),
         sessions: eng.snapshot(),
@@ -306,7 +314,7 @@ fn get_snapshot(state: State<AppState>) -> SessionsPayload {
 
 #[tauri::command]
 fn get_config(state: State<AppState>) -> Config {
-    state.config.lock().expect("config mutex poisoned").clone()
+    state.config.lock_safe().clone()
 }
 
 /// Persist a new config and apply its side effects: live port restart (with a
@@ -343,7 +351,7 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
     if let Some(server) = new_server {
         {
             let state = app.state::<AppState>();
-            let mut guard = state.listener.lock().expect("listener mutex poisoned");
+            let mut guard = state.listener.lock_safe();
             if let Some(old_server) = guard.take() {
                 old_server.unblock();
             }
@@ -359,7 +367,7 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
     // 4. Stale timeout + idle-drop window.
     if new.stale_timeout_min != old.stale_timeout_min || new.idle_drop_min != old.idle_drop_min {
         let state = app.state::<AppState>();
-        let mut eng = state.engine.lock().expect("engine mutex poisoned");
+        let mut eng = state.engine.lock_safe();
         eng.set_stale_timeout(Duration::from_secs(new.stale_timeout_min * 60));
         eng.set_drop_timeout(Duration::from_secs(new.idle_drop_min * 60));
     }
@@ -369,10 +377,7 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
     // Broadcast the new config so every window reacts — notably the theme: the
     // widget restyles even though the change was made in the settings window.
     let _ = app.emit("config-updated", &new);
-    *app.state::<AppState>()
-        .config
-        .lock()
-        .expect("config mutex poisoned") = new;
+    *app.state::<AppState>().config.lock_safe() = new;
     Ok(())
 }
 
@@ -383,7 +388,7 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
 fn set_tray_palette(app: AppHandle, palette: TrayPalette) {
     {
         let state = app.state::<AppState>();
-        *state.tray_palette.lock().expect("palette mutex poisoned") = palette;
+        *state.tray_palette.lock_safe() = palette;
     }
     tray::save_palette(&app, &palette);
     notify::render_icons(&app, &palette);
@@ -421,7 +426,7 @@ fn regenerate_token(app: AppHandle) -> Result<(), String> {
     let fresh = token::regenerate(&app)?;
     {
         let state = app.state::<AppState>();
-        *state.token.lock().expect("token mutex poisoned") = fresh.clone();
+        *state.token.lock_safe() = fresh.clone();
     }
     // Re-run the installer so the hooks' header (and capture script) match the
     // new token. Only if they're actually installed.
@@ -443,7 +448,7 @@ fn endpoint(app: AppHandle) -> String {
 fn focus_session(app: AppHandle, session_id: String) -> bool {
     let target = {
         let state = app.state::<AppState>();
-        let eng = state.engine.lock().expect("engine mutex poisoned");
+        let eng = state.engine.lock_safe();
         eng.focus_target(&session_id)
     };
     match target {
@@ -526,7 +531,6 @@ pub fn run() {
             // never surface a stale/blank settings webview either.
             tray::show_settings(app);
         }))
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -583,18 +587,25 @@ pub fn run() {
                 .name("beacon-events".into())
                 .spawn(move || {
                     for ev in rx {
-                        process_event(&worker_handle, ev);
+                        // A panic while handling one event must not kill the
+                        // worker: the listener would keep enqueueing into a dead
+                        // channel and the app would look alive while tracking
+                        // nothing. Drop the event, log, keep draining.
+                        let h = &worker_handle;
+                        let unwind =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                process_event(h, ev)
+                            }));
+                        if unwind.is_err() {
+                            eprintln!("beacon: panic while processing a hook event; event dropped");
+                        }
                     }
                 })?;
 
             // Load (or mint on first run) the listener auth token before the
             // listener binds, so it's enforcing a real secret from the start.
             let auth_token = token::load_or_create(&handle);
-            *handle
-                .state::<AppState>()
-                .token
-                .lock()
-                .expect("token mutex poisoned") = auth_token;
+            *handle.state::<AppState>().token.lock_safe() = auth_token;
 
             // Load persisted config and align runtime state with it.
             let cfg = config::load(&handle);
@@ -603,12 +614,12 @@ pub fn run() {
             let palette = tray::load_palette(&handle);
             {
                 let state = handle.state::<AppState>();
-                let mut eng = state.engine.lock().expect("engine mutex poisoned");
+                let mut eng = state.engine.lock_safe();
                 eng.set_stale_timeout(Duration::from_secs(cfg.stale_timeout_min * 60));
                 eng.set_drop_timeout(Duration::from_secs(cfg.idle_drop_min * 60));
                 drop(eng);
-                *state.config.lock().expect("config mutex poisoned") = cfg.clone();
-                *state.tray_palette.lock().expect("palette mutex poisoned") = palette;
+                *state.config.lock_safe() = cfg.clone();
+                *state.tray_palette.lock_safe() = palette;
             }
             notify::render_icons(&handle, &palette);
             // Keep the OS autostart entry in sync with the saved preference.
@@ -674,11 +685,7 @@ pub fn run() {
                     )
                     .into()
                 })?;
-            *handle
-                .state::<AppState>()
-                .listener
-                .lock()
-                .expect("listener mutex poisoned") = Some(server);
+            *handle.state::<AppState>().listener.lock_safe() = Some(server);
 
             // Background stale sweep. Newly-stale sessions may notify if the
             // user enabled idle notifications.
@@ -687,28 +694,36 @@ pub fn run() {
                 .name("beacon-sweep".into())
                 .spawn(move || loop {
                     std::thread::sleep(Duration::from_secs(SWEEP_INTERVAL_SECS));
-                    let outcome = {
-                        let state = sweep_handle.state::<AppState>();
-                        let mut eng = state.engine.lock().expect("engine mutex poisoned");
-                        eng.sweep()
-                    };
-                    if outcome.changed {
-                        refresh(&sweep_handle);
-                    }
-                    // Idle isn't a tracked traffic-light State, so we notify
-                    // directly (only when the user opted in) rather than routing
-                    // through the per-state notifier.
-                    if !outcome.went_stale.is_empty() {
-                        let notify_idle_on = {
+                    // Same rationale as the events worker: one panicking sweep
+                    // must not end stale detection for the rest of the run.
+                    let sweep_handle = &sweep_handle;
+                    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let outcome = {
                             let state = sweep_handle.state::<AppState>();
-                            let cfg = state.config.lock().expect("config mutex poisoned");
-                            cfg.notify_idle
+                            let mut eng = state.engine.lock_safe();
+                            eng.sweep()
                         };
-                        if notify_idle_on {
-                            for (_id, label) in &outcome.went_stale {
-                                notify_idle(&sweep_handle, label);
+                        if outcome.changed {
+                            refresh(sweep_handle);
+                        }
+                        // Idle isn't a tracked traffic-light State, so we notify
+                        // directly (only when the user opted in) rather than routing
+                        // through the per-state notifier.
+                        if !outcome.went_stale.is_empty() {
+                            let notify_idle_on = {
+                                let state = sweep_handle.state::<AppState>();
+                                let cfg = state.config.lock_safe();
+                                cfg.notify_idle
+                            };
+                            if notify_idle_on {
+                                for (_id, label) in &outcome.went_stale {
+                                    notify_idle(sweep_handle, label);
+                                }
                             }
                         }
+                    }));
+                    if unwind.is_err() {
+                        eprintln!("beacon: panic during stale sweep; skipping this pass");
                     }
                 })?;
 

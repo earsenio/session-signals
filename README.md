@@ -14,8 +14,8 @@ shows one row per live session — each colored as it moves between
 **hooks** that POST to a local listener: no terminal scraping, no process
 inspection, fully local.
 
-<!-- TODO: replace with a real screenshot/GIF of the tray icon + floating widget -->
-![Session Signals' tray icon and floating widget showing per-session status](docs/assets/session-signals-screenshot.png)
+<!-- TODO: add a screenshot/GIF of the tray icon + floating widget here
+     (docs/assets/session-signals-screenshot.png) once captured. -->
 
 ---
 
@@ -93,7 +93,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model.
 
 ## Build from source
 
-**Prerequisites:** Node.js 18+, the Rust toolchain (via [rustup](https://rustup.rs)),
+**Prerequisites:** Node.js 20.19+ (or 22.12+), the Rust toolchain (via [rustup](https://rustup.rs)),
 and the platform's Tauri dependencies (see [docs/BUILD.md](docs/BUILD.md)).
 
 ```bash

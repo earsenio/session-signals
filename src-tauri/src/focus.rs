@@ -29,7 +29,7 @@ pub struct FocusTarget {
 /// for known terminals, then falls back to an app-level raise by pid.
 #[cfg(target_os = "macos")]
 pub fn raise(t: &FocusTarget) -> bool {
-    if let Some(tty) = t.tty.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(tty) = t.tty.as_deref().filter(|s| tty_is_safe(s)) {
         let app = t.app.as_deref().unwrap_or("");
         // `comm` basenames: Terminal.app → "Terminal", iTerm2 → "iTerm2".
         let tab_raised = if app.eq_ignore_ascii_case("Terminal") {
@@ -46,6 +46,20 @@ pub fn raise(t: &FocusTarget) -> bool {
     raise_pid(t.pid)
 }
 
+/// Is `tty` safe to splice into an AppleScript string literal? The value arrives
+/// via an authenticated `BeaconTerminal` POST — not necessarily from our own
+/// capture script — so treat it as untrusted: accept only a device-path shape
+/// (`/dev/…` of benign characters). Anything else (quotes, backslashes,
+/// newlines) could break out of the quoted string and inject script.
+#[cfg(target_os = "macos")]
+fn tty_is_safe(tty: &str) -> bool {
+    tty.starts_with("/dev/")
+        && tty.len() <= 64
+        && tty
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+}
+
 /// Run an AppleScript and report success — true only if osascript exited 0 *and*
 /// the script printed our sentinel (so "compiled but matched nothing" reads as a
 /// miss, letting the caller fall back rather than claim a phantom success).
@@ -60,7 +74,7 @@ fn osascript_ok(script: &str) -> bool {
 }
 
 /// Terminal.app: find the tab whose `tty` matches, select it, raise its window.
-/// `tty` is a fixed `/dev/ttysNNN` string (no quoting hazard).
+/// `tty` was validated by [`raise`] (`tty_is_safe`) before it reaches here.
 #[cfg(target_os = "macos")]
 fn raise_terminal_app_tab(tty: &str) -> bool {
     let script = format!(
@@ -252,4 +266,24 @@ pub fn raise_pid(_pid: i32) -> bool {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn frontmost_pid() -> Option<i32> {
     None
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::tty_is_safe;
+
+    #[test]
+    fn tty_validation_accepts_real_devices_and_rejects_injection() {
+        // Real controlling-tty shapes the capture script produces.
+        assert!(tty_is_safe("/dev/ttys003"));
+        assert!(tty_is_safe("/dev/pts/12"));
+
+        // Anything that could escape the AppleScript string literal is refused.
+        assert!(!tty_is_safe(""));
+        assert!(!tty_is_safe("ttys003")); // not a /dev path
+        assert!(!tty_is_safe("/dev/ttys003\" then do shell script \"id"));
+        assert!(!tty_is_safe("/dev/ttys\\003"));
+        assert!(!tty_is_safe("/dev/ttys003\nactivate"));
+        assert!(!tty_is_safe(&format!("/dev/{}", "a".repeat(100)))); // length cap
+    }
 }

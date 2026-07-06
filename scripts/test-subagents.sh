@@ -6,16 +6,47 @@
 # first — the sub-line only renders in expanded rows, not the compact pill.
 #
 # Usage:  bash scripts/test-subagents.sh [port]   (default port 4317)
+#
+# The listener requires the X-Beacon-Token header on every POST. The token is
+# read from $BEACON_TOKEN if set, otherwise auto-extracted from the installed
+# hooks in ~/.claude/settings.json.
 set -euo pipefail
 PORT="${1:-4317}"
 URL="http://127.0.0.1:${PORT}/hook"
 SID="beacon-demo-fanout"
 CWD="/tmp/beacon-demo/my-project"   # not a git repo → row label is "my-project"
 
+TOKEN="${BEACON_TOKEN:-$(python3 - <<'PY'
+import json, os
+try:
+    settings = json.load(open(os.path.expanduser("~/.claude/settings.json")))
+    for groups in settings.get("hooks", {}).values():
+        for g in groups:
+            for h in g.get("hooks", []):
+                tok = h.get("headers", {}).get("X-Beacon-Token")
+                if h.get("type") == "http" and tok:
+                    print(tok)
+                    raise SystemExit
+except (OSError, ValueError):
+    pass
+PY
+)}"
+if [ -z "$TOKEN" ]; then
+  echo "No listener token found. Install Session Signals' hooks first (Settings → Install)," >&2
+  echo "or pass one explicitly: BEACON_TOKEN=<token> bash scripts/test-subagents.sh" >&2
+  exit 1
+fi
+
 hook() { # hook <EventName> [notification_type]
   local body="{\"hook_event_name\":\"$1\",\"session_id\":\"$SID\",\"cwd\":\"$CWD\""
   [ -n "${2:-}" ] && body="$body,\"notification_type\":\"$2\""
-  curl -s -m 2 -X POST "$URL" -H 'Content-Type: application/json' -d "$body}" >/dev/null
+  local code
+  code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' -X POST "$URL" \
+    -H 'Content-Type: application/json' -H "X-Beacon-Token: $TOKEN" -d "$body}")
+  if [ "$code" != "200" ]; then
+    echo "Hook POST rejected (HTTP $code) — wrong token? Regenerate it in Settings or set \$BEACON_TOKEN." >&2
+    exit 1
+  fi
 }
 state() { curl -s "http://127.0.0.1:${PORT}/state" \
   | python3 -c "import sys,json;[print(f\"   {s['label']:<14} {s['state']:<10} agents={s['subagent_count']} t={s['subagent_seconds']}s\") for s in json.load(sys.stdin)['sessions'] if s['session_id']=='$SID']"; }

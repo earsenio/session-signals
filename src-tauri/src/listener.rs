@@ -8,6 +8,7 @@
 
 use crate::engine::HookEvent;
 use crate::token;
+use crate::LockExt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -62,7 +63,7 @@ where
 /// we compare the full strings. A blank expected token (shouldn't happen) fails
 /// closed.
 fn token_ok(request: &Request, auth: &AuthToken) -> bool {
-    let expected = auth.lock().expect("auth token mutex poisoned").clone();
+    let expected = auth.lock_safe().clone();
     if expected.is_empty() {
         return false;
     }

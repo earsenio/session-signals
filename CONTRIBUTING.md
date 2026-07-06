@@ -21,7 +21,7 @@ architectural decisions, and [docs/SPEC.md](docs/SPEC.md) for the requirements.
 
 ## Development setup
 
-**Prerequisites:** Node.js 18+, the Rust toolchain via [rustup](https://rustup.rs),
+**Prerequisites:** Node.js 20.19+ (or 22.12+), the Rust toolchain via [rustup](https://rustup.rs),
 and your platform's Tauri system dependencies (WebView, build tools) — see
 [docs/BUILD.md](docs/BUILD.md).
 

@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    AppHandle, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_store::StoreExt;
@@ -314,10 +314,14 @@ fn load_f64(app: &AppHandle, key: &str) -> Option<f64> {
 }
 
 pub fn set_opacity(app: &AppHandle, opacity: f64) {
+    let clamped = opacity.clamp(0.3, 1.0);
     if let Ok(store) = app.store(STORE_FILE) {
-        store.set(KEY_OPACITY, opacity.clamp(0.3, 1.0));
+        store.set(KEY_OPACITY, clamped);
         let _ = store.save();
     }
+    // Live-apply: the widget listens for this so the Settings slider restyles
+    // it immediately (it otherwise reads opacity only once, on mount).
+    let _ = app.emit("widget-opacity", clamped);
 }
 
 fn set_bool(app: &AppHandle, key: &str, value: bool) {

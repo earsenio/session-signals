@@ -71,7 +71,8 @@ before reporting.
 ### 4. Webview content security
 
 The UI loads no remote content; there is no HTTP client in the codebase. A
-restrictive CSP is recommended as defense-in-depth for release builds.
+restrictive CSP is enforced as defense-in-depth (see `app.security.csp` in
+`src-tauri/tauri.conf.json`).
 
 ## Summary of guarantees
 

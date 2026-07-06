@@ -165,14 +165,20 @@ fn write_settings(path: &PathBuf, settings: &Map<String, Value>) -> Result<(), S
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
-    // Back up the existing file once before we touch it.
+    // Keep a copy of the file as it was before this write. Note this is a
+    // "previous version", not a pristine pre-install snapshot: every write
+    // refreshes it, so it always holds the state from exactly one write ago.
     if path.exists() {
         let backup = path.with_extension("json.beacon.bak");
         let _ = std::fs::copy(path, backup);
     }
     let body = serde_json::to_string_pretty(&Value::Object(settings.clone()))
         .map_err(|e| format!("could not serialize settings: {e}"))?;
-    std::fs::write(path, body + "\n").map_err(|e| format!("could not write settings.json: {e}"))
+    // Write-then-rename so a crash mid-write can never leave settings.json
+    // truncated or half-written — it's the user's entire Claude Code config.
+    let tmp = path.with_extension("json.beacon.tmp");
+    std::fs::write(&tmp, body + "\n").map_err(|e| format!("could not write settings.json: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("could not write settings.json: {e}"))
 }
 
 /// Are any of Session Signals' hooks currently present in settings.json? Port-agnostic

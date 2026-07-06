@@ -254,6 +254,43 @@ code {
   font-size: 11px;
 }
 
+/* --- Range slider (widget opacity) --- */
+.sRangeCtl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sRange {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 110px;
+  height: 4px;
+  border-radius: 2px;
+  background: #33363c;
+  outline: none;
+  cursor: pointer;
+}
+
+.sRange::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #d7dadf;
+  border: none;
+}
+
+.sRangeVal {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  min-width: 34px;
+  text-align: right;
+}
+
 /* --- Segmented control (theme) --- */
 .sSegment {
   display: inline-flex;

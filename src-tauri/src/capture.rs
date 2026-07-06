@@ -136,12 +136,25 @@ pub fn write_script(app: &AppHandle, port: u16, token: &str) -> Option<String> {
     let body = SCRIPT_TEMPLATE
         .replace("__PORT__", &port.to_string())
         .replace("__TOKEN__", token);
-    std::fs::write(&path, body).ok()?;
-    // Make it executable on unix (cosmetic — we invoke via `sh` regardless).
+    // The script embeds the auth token, so it must be owner-only. On unix,
+    // create it 0o700 from the first byte (the exec bit is cosmetic — we invoke
+    // via `sh` regardless), then re-apply in case the file already existed with
+    // looser permissions from an earlier version.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o700)
+            .open(&path)
+            .ok()?;
+        file.write_all(body.as_bytes()).ok()?;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
     }
+    #[cfg(not(unix))]
+    std::fs::write(&path, body).ok()?;
     Some(command_for(&path))
 }

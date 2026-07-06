@@ -21,10 +21,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# tray-icon: tray support. image-png: decode our colored PNG tray icons at runtime.
+# tray-icon: tray support (the tray glyph is drawn as raw RGBA — no runtime
+# image decoding, so no image-* feature is needed).
 # macos-private-api: required for the transparent floating widget window.
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
-tauri-plugin-opener = "2"
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 # Single-instance guard so only one Session Signals owns the listener port.
 tauri-plugin-single-instance = "2"
 # Persistent JSON store (app config dir) for widget position + view prefs.
@@ -45,11 +45,9 @@ png = "0.17"
 getrandom = "0.2"
 
 # --- Click-to-focus terminal (raise a window by its owning PID) ---
-# macOS: NSRunningApplication.activate / NSWorkspace.frontmostApplication. These
-# match the objc2 versions Tauri already pulls in, so no duplicate-crate bloat.
+# macOS: NSRunningApplication.activate / NSWorkspace.frontmostApplication. This
+# matches the objc2 version Tauri already pulls in, so no duplicate-crate bloat.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace", "NSApplication"] }
 
 # Windows: EnumWindows / SetForegroundWindow / GetForegroundWindow.

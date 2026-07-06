@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 // Bundled fonts (offline — loading from a CDN would be network egress, which
 // Session Signals' privacy guardrail forbids). Geist for UI, Geist Mono for code/labels.
 import "@fontsource/geist-sans/latin-400.css";
@@ -21,14 +22,9 @@ applyThemeToDom(getTheme(DEFAULT_THEME_ID));
 // styles, keeping its background transparent).
 function resolveLabel(): string {
   try {
-    // `__TAURI_INTERNALS__` carries the current window's metadata. Reading it
-    // avoids an async import and works the moment the script runs.
-    const internals = (
-      window as unknown as {
-        __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
-      }
-    ).__TAURI_INTERNALS__;
-    return internals?.metadata?.currentWindow?.label ?? "settings";
+    // Synchronous in Tauri 2 — available the moment the script runs. The catch
+    // covers running outside Tauri (plain `vite dev` in a browser).
+    return getCurrentWindow().label;
   } catch {
     return "settings";
   }

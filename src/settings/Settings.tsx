@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { DEFAULT_CONFIG, SOUNDS, type Config, type StateNotify } from "../state/config";
+import type { WidgetPrefs } from "../state/types";
 import { useTheme } from "../themes/useTheme";
 import { THEME_LIST, type ThemePalette } from "../themes";
 import { StateGlyph } from "../components/StateGlyph";
@@ -26,6 +28,7 @@ export default function Settings() {
   const [hookBlock, setHookBlock] = useState("");
   const [status, setStatus] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const [appVersion, setAppVersion] = useState("");
+  const [widgetOpacity, setWidgetOpacity] = useState(0.95);
   const flashTimer = useRef<number | undefined>(undefined);
 
   const flash = useCallback((msg: string, kind: "ok" | "err") => {
@@ -54,6 +57,9 @@ export default function Settings() {
         setPortInput(String(c.port));
       })
       .catch(() => {});
+    invoke<WidgetPrefs>("widget_prefs")
+      .then((p) => setWidgetOpacity(p.opacity))
+      .catch(() => {});
     refreshHooks();
     // Read the running app version straight from Tauri so it always reflects the
     // built bundle — never hardcoded (single source of truth is package.json).
@@ -61,6 +67,22 @@ export default function Settings() {
       .then(setAppVersion)
       .catch(() => {});
   }, [refreshHooks]);
+
+  // Tray-menu actions (install/uninstall hooks) report their result through
+  // this event; surface it as a toast and refresh the hook card so it reflects
+  // what the tray just did.
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen<string>("beacon://toast", (e) => {
+      if (!active) return;
+      flash(e.payload, /failed/i.test(e.payload) ? "err" : "ok");
+      refreshHooks();
+    });
+    return () => {
+      active = false;
+      void unlisten.then((un) => un());
+    };
+  }, [flash, refreshHooks]);
 
   // Persist a full config and reflect backend errors.
   const persist = useCallback(
@@ -292,6 +314,30 @@ export default function Settings() {
 
           <div className="sRow">
             <div className="sRowText">
+              <span className="sRowTitle">Widget opacity</span>
+              <span className="sRowHint">Background transparency of the floating widget</span>
+            </div>
+            <div className="sRangeCtl">
+              <input
+                className="sRange"
+                type="range"
+                min={30}
+                max={100}
+                step={5}
+                value={Math.round(widgetOpacity * 100)}
+                aria-label="Widget opacity"
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10) / 100;
+                  setWidgetOpacity(v);
+                  invoke("widget_set_opacity", { opacity: v }).catch(() => {});
+                }}
+              />
+              <span className="sRangeVal">{Math.round(widgetOpacity * 100)}%</span>
+            </div>
+          </div>
+
+          <div className="sRow">
+            <div className="sRowText">
               <span className="sRowTitle">Theme</span>
               <span className="sRowHint">Shape set + color map</span>
             </div>
@@ -336,9 +382,9 @@ export default function Settings() {
             </button>
           </div>
           <p className="sHookNote">
-            Session Signals detects sessions via hooks that POST to <code>{endpoint}</code>. Each hook
-            carries a private token (the <code>X-Beacon-Token</code> header) so only Session Signals’ own
-            hooks can report state — other local programs are rejected.
+            Session Signals detects sessions via hooks that POST to <code>{endpoint}</code>. Each
+            hook carries a private token (the <code>X-Beacon-Token</code> header) so only Session
+            Signals’ own hooks can report state — other local programs are rejected.
           </p>
           <div className="sHookBtns">
             <button className="sBtn" onClick={regenerateToken}>
@@ -494,8 +540,9 @@ function Onboarding({
       </div>
       <h1 className="sOnboardTitle">One quick setup</h1>
       <p className="sOnboardDesc">
-        Session Signals watches your Claude Code sessions through a small hook in its config. Add it once and
-        Session Signals will know the moment a session needs you, starts working, or finishes its turn.
+        Session Signals watches your Claude Code sessions through a small hook in its config. Add it
+        once and Session Signals will know the moment a session needs you, starts working, or
+        finishes its turn.
       </p>
       <button className="sOnboardBtn" onClick={onInstall}>
         Set up automatically
@@ -505,7 +552,8 @@ function Onboarding({
       </button>
       <pre className="sCode sOnboardCode">{hookBlock}</pre>
       <p className="sOnboardFoot">
-        Session Signals only appends its hook · reversible anytime below · no code leaves your machine
+        Session Signals only appends its hook · reversible anytime below · no code leaves your
+        machine
       </p>
     </section>
   );

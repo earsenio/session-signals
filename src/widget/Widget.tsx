@@ -375,16 +375,29 @@ export default function Widget() {
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    let active = true;
     invoke<WidgetPrefs>("widget_prefs")
       .then((p) => {
+        if (!active) return;
         setCompact(p.compact);
         setOpacity(p.opacity);
       })
       .catch(() => {});
     // For the footer status strip; read-only, no engine change.
     invoke<{ port: number }>("get_config")
-      .then((c) => setPort(c.port))
+      .then((c) => {
+        if (active) setPort(c.port);
+      })
       .catch(() => {});
+    // Live updates from the Settings opacity slider (prefs are otherwise read
+    // only once, on mount).
+    const unlisten = listen<number>("widget-opacity", (e) => {
+      if (active) setOpacity(e.payload);
+    });
+    return () => {
+      active = false;
+      void unlisten.then((un) => un());
+    };
   }, []);
 
   const toggleCompact = useCallback(() => {

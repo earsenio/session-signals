@@ -5,7 +5,7 @@ Vite frontend. One codebase produces native installers for macOS and Windows.
 
 ## Prerequisites
 
-- **Node** 18+ and npm — `npm install` once in the repo root.
+- **Node** 20.19+ (or 22.12+, per Vite 7) and npm — `npm install` once in the repo root.
 - **Rust** stable (via [rustup](https://rustup.rs)).
 - **Platform toolchain:**
   - macOS: Xcode Command Line Tools (`xcode-select --install`).
