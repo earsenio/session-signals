@@ -269,6 +269,23 @@ body {
   color: var(--branch-icon);
 }
 
+/* Subtle "this is a git worktree" tag — small, dim, faintly outlined so it reads
+   as metadata next to the repo name rather than competing with it. */
+.wRowWorktree {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-2);
+  border: 1px solid var(--label-2);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 13px;
+  opacity: 0.6;
+  flex: none;
+}
+
 .wRowState {
   font-size: 11.5px;
   font-weight: 500;

@@ -158,6 +158,10 @@ pub struct SessionView {
     /// re-parse `label` (a folder literally named `foo (bar)` would misparse).
     pub folder: String,
     pub branch: Option<String>,
+    /// True when the session's cwd is a linked git worktree. The UI shows a
+    /// subtle marker so a worktree session is distinguishable from a checkout of
+    /// the same repo. Display-only.
+    pub worktree: bool,
     pub state: State,
     pub stale: bool,
     /// Seconds the session has been in its current state.
@@ -692,12 +696,13 @@ impl Engine {
             .sessions
             .iter()
             .map(|(id, s)| {
-                let (folder, branch) = label_parts(&s.cwd);
+                let (folder, branch, worktree) = label_parts_worktree(&s.cwd);
                 SessionView {
                     session_id: id.clone(),
                     label: combine_label(folder.clone(), branch.as_deref()),
                     folder,
                     branch,
+                    worktree,
                     state: s.state,
                     stale: s.stale,
                     seconds_in_state: now.duration_since(s.state_since).as_secs(),
@@ -717,35 +722,53 @@ impl Engine {
     }
 }
 
+/// Repo facts derived from a working directory, used to build the session label
+/// and the worktree marker. Pure filesystem reads — no subprocess.
+struct GitInfo {
+    /// Basename shown to the user. For a linked worktree this is the **main
+    /// repo's** name (e.g. `cc-beacon`), never the worktree folder's name.
+    base: String,
+    /// Current branch, or None when HEAD is detached/unreadable.
+    branch: Option<String>,
+    /// True when `cwd` lives in a `git worktree` (a `.git` *file* plus a
+    /// `commondir`). Submodules use a `.git` file too but have no `commondir`,
+    /// so they are not flagged.
+    worktree: bool,
+}
+
 /// Build a human label from a working directory, structured: the git **repo
 /// root**'s basename plus its branch, if the cwd is inside a repo. We walk up
-/// from `cwd` to find the `.git` directory so a subfolder cwd (e.g.
+/// from `cwd` to find the `.git` entry so a subfolder cwd (e.g.
 /// `.../proj/src-tauri`) still shows the project name and branch rather than
 /// the subfolder. Falls back to `(basename(cwd), None)` when no repo is found.
 /// No subprocess. Shipped as separate parts so renderers never re-parse the
 /// combined string (a folder literally named `foo (bar)` would misparse).
 pub fn label_parts(cwd: &str) -> (String, Option<String>) {
+    let (folder, branch, _) = label_parts_worktree(cwd);
+    (folder, branch)
+}
+
+/// Like [`label_parts`] but also reports whether the cwd is a linked git
+/// worktree, so the widget can flag it without re-reading the filesystem. For a
+/// worktree the folder is the **main repo's** name and the branch is the
+/// worktree's own checkout (both of which a `.git` *file* would otherwise hide).
+pub fn label_parts_worktree(cwd: &str) -> (String, Option<String>, bool) {
+    match git_info(cwd) {
+        Some(info) => (info.base, info.branch, info.worktree),
+        None => (fallback_basename(cwd), None, false),
+    }
+}
+
+/// `basename(cwd)` for the no-repo case; "session" for an empty cwd.
+fn fallback_basename(cwd: &str) -> String {
     if cwd.is_empty() {
-        return ("session".to_string(), None);
+        return "session".to_string();
     }
-    let path = Path::new(cwd);
-
-    if let Some(root) = find_git_root(path) {
-        let base = root
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("session")
-            .to_string();
-        return (base, read_git_branch(&root));
-    }
-
-    (
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(cwd)
-            .to_string(),
-        None,
-    )
+    Path::new(cwd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(cwd)
+        .to_string()
 }
 
 /// The combined one-line label: `folder (branch)` or just `folder`.
@@ -775,13 +798,90 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Resolve the current branch by reading `<root>/.git/HEAD`. Returns None if
-/// HEAD is detached, unreadable, or the repo uses a `.git` file (worktree).
-fn read_git_branch(root: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
-    let head = head.trim();
-    // Typical content: "ref: refs/heads/main"
-    head.strip_prefix("ref: refs/heads/").map(|b| b.to_string())
+/// Resolve repo facts for `cwd` from the filesystem, transparently handling
+/// linked worktrees (where `.git` is a *file* pointing at the real git dir).
+fn git_info(cwd: &str) -> Option<GitInfo> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let root = find_git_root(Path::new(cwd))?;
+    let dotgit = root.join(".git");
+
+    // Normal clone: `.git` is a directory; branch lives at `.git/HEAD`.
+    if dotgit.is_dir() {
+        return Some(GitInfo {
+            base: basename(&root)?,
+            branch: read_head_branch(&dotgit),
+            worktree: false,
+        });
+    }
+
+    // `.git` is a *file* → linked worktree or submodule. It points at the real
+    // git dir ("gitdir: <path>"), where this checkout's HEAD lives.
+    let gitdir = read_gitdir_pointer(&dotgit)?;
+    let branch = read_head_branch(&gitdir);
+
+    // A linked worktree's git dir carries a `commondir` pointing back at the
+    // shared repo; the repo root is that common dir's parent, giving us the main
+    // repo's name. Submodules have no `commondir`, so they keep their own folder
+    // name and are not flagged as worktrees.
+    match worktree_repo_root(&gitdir) {
+        Some(repo_root) => Some(GitInfo {
+            base: basename(&repo_root).or_else(|| basename(&root))?,
+            branch,
+            worktree: true,
+        }),
+        None => Some(GitInfo {
+            base: basename(&root)?,
+            branch,
+            worktree: false,
+        }),
+    }
+}
+
+fn basename(p: &Path) -> Option<String> {
+    p.file_name().and_then(|s| s.to_str()).map(str::to_string)
+}
+
+/// Resolve the current branch by reading `<gitdir>/HEAD`. None if HEAD is
+/// detached or unreadable.
+fn read_head_branch(gitdir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    // Typical content: "ref: refs/heads/main".
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_string)
+}
+
+/// Read a `.git` *file* (worktree/submodule) and resolve the git dir it points
+/// at. Content is "gitdir: <path>"; a relative path resolves against the file's
+/// directory. Canonicalized so `..` segments collapse (best-effort).
+fn read_gitdir_pointer(dotgit_file: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(dotgit_file).ok()?;
+    let raw = content.trim().strip_prefix("gitdir:")?.trim();
+    let p = Path::new(raw);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        dotgit_file.parent()?.join(p)
+    };
+    Some(std::fs::canonicalize(&abs).unwrap_or(abs))
+}
+
+/// Given a linked worktree's git dir (`…/.git/worktrees/<name>`), resolve the
+/// shared repo's working-tree root via its `commondir` file (relative to the git
+/// dir). None when there is no `commondir` — i.e. not a linked worktree.
+fn worktree_repo_root(gitdir: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let p = Path::new(content.trim());
+    // `common` is the shared `.git` dir; the repo root is its parent.
+    let common = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        gitdir.join(p)
+    };
+    let common = std::fs::canonicalize(&common).unwrap_or(common);
+    common.parent().map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -1454,5 +1554,50 @@ mod tests {
         assert!(!out.changed, "nothing to sweep");
         assert!(out.went_stale.is_empty());
         assert_eq!(e.rollup(), Rollup::Grey);
+    }
+
+    /// Build a throwaway repo + linked worktree on disk and check label
+    /// resolution: a normal clone shows its own name + branch and isn't flagged;
+    /// a linked worktree shows the **main repo's** name + the worktree's branch
+    /// and is flagged.
+    #[test]
+    fn label_parts_resolves_clone_and_worktree() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("beacon_wt_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+
+        // Normal clone: `.git` is a directory with HEAD → ("myrepo", "main", not wt).
+        let repo = base.join("myrepo");
+        let gitdir = repo.join(".git");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let (folder, branch, wt) = label_parts_worktree(repo.to_str().unwrap());
+        assert_eq!(folder, "myrepo");
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert!(!wt, "a normal clone is not a worktree");
+
+        // Linked worktree: a separate working dir whose `.git` *file* points at
+        // `<repo>/.git/worktrees/feat`, which carries its own HEAD + a commondir
+        // (`../..`) resolving back to the shared `.git`.
+        let wt_gitdir = gitdir.join("worktrees").join("feat");
+        fs::create_dir_all(&wt_gitdir).unwrap();
+        fs::write(wt_gitdir.join("HEAD"), "ref: refs/heads/feature-x\n").unwrap();
+        fs::write(wt_gitdir.join("commondir"), "../..\n").unwrap();
+        let wt_dir = base.join("scratch-worktree");
+        fs::create_dir_all(&wt_dir).unwrap();
+        fs::write(
+            wt_dir.join(".git"),
+            format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+        let (folder, branch, wt) = label_parts_worktree(wt_dir.to_str().unwrap());
+        assert_eq!(
+            folder, "myrepo",
+            "worktree shows main repo name, not the worktree folder name"
+        );
+        assert_eq!(branch.as_deref(), Some("feature-x"), "resolves the worktree's own branch");
+        assert!(wt, "flagged as a worktree");
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
