@@ -14,8 +14,8 @@ shows one row per live session — each colored as it moves between
 **hooks** that POST to a local listener: no terminal scraping, no process
 inspection, fully local.
 
-<!-- TODO: add a screenshot/GIF of the tray icon + floating widget here
-     (docs/assets/session-signals-screenshot.png) once captured. -->
+<img width="392" height="378" alt="Screenshot 2026-06-28 at 7 06 21 PM" src="https://github.com/user-attachments/assets/d21d7027-6faa-4d60-b267-a791d9501e02" />
+<img width="572" height="901" alt="Screenshot 2026-06-28 at 7 10 17 PM" src="https://github.com/user-attachments/assets/1f21f5ef-80cd-4bef-b6f9-d76eeb173743" />
 
 ---
 
