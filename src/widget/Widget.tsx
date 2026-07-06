@@ -11,6 +11,7 @@ import {
   type SessionView,
   type WidgetPrefs,
 } from "../state/types";
+import { useConfig } from "../state/useConfig";
 import { useTheme } from "../themes/useTheme";
 import type { ThemePalette } from "../themes";
 import { StateGlyph } from "../components/StateGlyph";
@@ -25,13 +26,6 @@ function formatAge(seconds: number): string {
   const ss = String(s).padStart(2, "0");
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${ss}`;
   return `${m}:${ss}`;
-}
-
-/// The engine ships a combined label ("folder (branch)"); split it for the
-/// two-tone row presentation. Pure presentation — the engine is unchanged.
-function splitLabel(label: string): { folder: string; branch: string | null } {
-  const m = label.match(/^(.*) \(([^)]+)\)$/);
-  return m ? { folder: m[1], branch: m[2] } : { folder: label, branch: null };
 }
 
 /// Horizontal padding of `.wPill` (2 × --sp-4), added to the measured content
@@ -129,7 +123,8 @@ function headerStatus(rollup: Rollup, sessions: LiveSession[]): string {
 }
 
 function ExpandedRow({ session, palette }: { session: LiveSession; palette: ThemePalette }) {
-  const { folder, branch } = splitLabel(session.label);
+  // The engine ships the label pre-split (folder + branch) — never re-parsed here.
+  const { folder, branch } = session;
   const color = rowColor(palette, session);
   const stateText = session.stale ? "No response" : ROW_STATE_TEXT[session.state];
   // Subagent activity is independent of the row's own state: a session can be
@@ -370,7 +365,9 @@ export default function Widget() {
   const palette = theme.palette;
   const [compact, setCompact] = useState(false);
   const [opacity, setOpacity] = useState(0.95);
-  const [port, setPort] = useState<number | null>(null);
+  // For the footer status strip; read-only, tracks config-updated so a port
+  // change made in Settings shows here without a restart.
+  const { port } = useConfig();
   const rootRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -381,12 +378,6 @@ export default function Widget() {
         if (!active) return;
         setCompact(p.compact);
         setOpacity(p.opacity);
-      })
-      .catch(() => {});
-    // For the footer status strip; read-only, no engine change.
-    invoke<{ port: number }>("get_config")
-      .then((c) => {
-        if (active) setPort(c.port);
       })
       .catch(() => {});
     // Live updates from the Settings opacity slider (prefs are otherwise read
@@ -531,7 +522,7 @@ export default function Widget() {
       </div>
 
       <footer className="wFooter">
-        <span className="wFootItem">LISTENING · :{port ?? "—"}</span>
+        <span className="wFootItem">LISTENING · :{port}</span>
         <span className="wFootItem">
           {sessions.length} SESSION{sessions.length === 1 ? "" : "S"}
         </span>

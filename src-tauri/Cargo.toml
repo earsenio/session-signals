@@ -42,7 +42,7 @@ tiny_http = "0.12"
 # icon uses raw RGBA via tauri::image::Image and needs no encoder.)
 png = "0.17"
 # OS CSPRNG for the listener auth token (32 random bytes → hex).
-getrandom = "0.2"
+getrandom = "0.3"
 
 # --- Click-to-focus terminal (raise a window by its owning PID) ---
 # macOS: NSRunningApplication.activate / NSWorkspace.frontmostApplication. This

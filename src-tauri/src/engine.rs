@@ -122,6 +122,9 @@ pub struct HookEvent {
 pub struct Transition {
     pub session_id: String,
     pub label: String,
+    /// The label's folder part alone (no branch) — what notifications title
+    /// with, shipped separately so nothing re-parses the combined label.
+    pub folder: String,
     pub from: Option<State>,
     pub to: State,
     /// The session's captured terminal pid at transition time, if known. Lets
@@ -148,7 +151,13 @@ pub struct SweepOutcome {
 #[derive(Serialize, Clone, Debug)]
 pub struct SessionView {
     pub session_id: String,
+    /// Combined one-line label (`folder (branch)` or `folder`) — used for
+    /// sorting and plain-text surfaces (tray tooltips, notifications).
     pub label: String,
+    /// The label's structured parts, so the widget's two-tone row never has to
+    /// re-parse `label` (a folder literally named `foo (bar)` would misparse).
+    pub folder: String,
+    pub branch: Option<String>,
     pub state: State,
     pub stale: bool,
     /// Seconds the session has been in its current state.
@@ -179,12 +188,24 @@ pub struct CapturedTerminal {
     pub tty: Option<String>,
 }
 
+/// How long after `SessionEnd` a *heartbeat* for that session id is ignored
+/// instead of resurrecting the row. Subagent stragglers (`PostToolUse`,
+/// `PostToolBatch`, `SubagentStop`) can arrive moments after the main agent
+/// ends the session; without this they'd recreate it as Working until the
+/// stale sweep. Real restarts are unaffected: state-setting events
+/// (`SessionStart`, `UserPromptSubmit`, …) clear the tombstone.
+const END_TOMBSTONE: Duration = Duration::from_secs(30);
+
 pub struct Engine {
     sessions: HashMap<String, Session>,
     /// Remembered terminal handles keyed by `session_id`, rehydrated at startup.
     /// Consulted when a session is (re)created so a restart keeps click-to-focus;
     /// never iterated to build the session list (it cannot create rows).
     pending_captures: HashMap<String, CapturedTerminal>,
+    /// Recently-ended session ids (`SessionEnd` time), so straggler heartbeats
+    /// can't resurrect them. Entries expire after [`END_TOMBSTONE`]; pruned on
+    /// sweep.
+    recent_ends: HashMap<String, Instant>,
     stale_timeout: Duration,
     /// Total silence before a session is removed from the list entirely. An
     /// idle session is visibly greyed ("No response") for the whole window
@@ -200,6 +221,7 @@ impl Engine {
         Engine {
             sessions: HashMap::new(),
             pending_captures: HashMap::new(),
+            recent_ends: HashMap::new(),
             stale_timeout,
             drop_timeout,
         }
@@ -366,6 +388,10 @@ impl Engine {
                 // The terminal is gone; forget its remembered handle too so a
                 // stale entry can't outlive the session in the persisted store.
                 self.pending_captures.remove(&ev.session_id);
+                // Tombstone the id briefly so straggler heartbeats (a subagent's
+                // late PostToolUse) can't resurrect the row — see `heartbeat`.
+                self.recent_ends
+                    .insert(ev.session_id.clone(), Instant::now());
                 ApplyOutcome {
                     changed: self.sessions.remove(&ev.session_id).is_some(),
                     transition: None,
@@ -385,7 +411,8 @@ impl Engine {
     /// session alive and feed the subagent count without recoloring the row. If
     /// the session is unknown (we never saw it start), fall back to creating it
     /// as Working via `transition_to`, which also rehydrates any remembered
-    /// terminal capture.
+    /// terminal capture — unless the id was just `SessionEnd`ed, in which case
+    /// the event is a straggler and is dropped rather than resurrecting the row.
     fn heartbeat(&mut self, ev: &HookEvent) -> ApplyOutcome {
         if let Some(s) = self.sessions.get_mut(&ev.session_id) {
             s.last_seen = Instant::now();
@@ -395,6 +422,15 @@ impl Engine {
             }
             ApplyOutcome {
                 changed: true,
+                transition: None,
+            }
+        } else if self
+            .recent_ends
+            .get(&ev.session_id)
+            .is_some_and(|t| t.elapsed() < END_TOMBSTONE)
+        {
+            ApplyOutcome {
+                changed: false,
                 transition: None,
             }
         } else {
@@ -407,6 +443,9 @@ impl Engine {
     /// so callers/notifications never fire on a same-state repeat.
     fn transition_to(&mut self, ev: &HookEvent, state: State) -> ApplyOutcome {
         let now = Instant::now();
+        // A state-setting event is real activity — a genuine restart/resume of
+        // this id, never a straggler — so any end-tombstone is void.
+        self.recent_ends.remove(&ev.session_id);
         // A terminal handle remembered across a restart (seeded at startup). It's
         // attached only when this session's row is (re)created or is still
         // missing a handle — so a Session Signals restart keeps click-to-focus for
@@ -467,12 +506,16 @@ impl Engine {
             }
         };
 
-        let transition = from.map(|prev| Transition {
-            session_id: ev.session_id.clone(),
-            label: label_for(&cwd),
-            from: prev,
-            to: state,
-            terminal_pid,
+        let transition = from.map(|prev| {
+            let (folder, branch) = label_parts(&cwd);
+            Transition {
+                session_id: ev.session_id.clone(),
+                label: combine_label(folder.clone(), branch.as_deref()),
+                folder,
+                from: prev,
+                to: state,
+                terminal_pid,
+            }
         });
         ApplyOutcome {
             changed: true,
@@ -579,6 +622,10 @@ impl Engine {
         let mut changed = false;
         let mut went_stale = Vec::new();
 
+        // Expired end-tombstones are useless — prune so the map can't grow.
+        self.recent_ends
+            .retain(|_, t| now.duration_since(*t) < END_TOMBSTONE);
+
         // Drop sessions silent past the whole idle-drop window. Until then a
         // stale session stays in the list (greyed) — it is not removed just for
         // crossing the stale timeout.
@@ -644,19 +691,24 @@ impl Engine {
         let mut views: Vec<SessionView> = self
             .sessions
             .iter()
-            .map(|(id, s)| SessionView {
-                session_id: id.clone(),
-                label: label_for(&s.cwd),
-                state: s.state,
-                stale: s.stale,
-                seconds_in_state: now.duration_since(s.state_since).as_secs(),
-                subagent_count: s.subagent_count,
-                subagent_seconds: s
-                    .sub_since
-                    .map(|t| now.duration_since(t).as_secs())
-                    .unwrap_or(0),
-                can_focus: s.terminal_pid.is_some(),
-                descriptor: s.descriptor.clone(),
+            .map(|(id, s)| {
+                let (folder, branch) = label_parts(&s.cwd);
+                SessionView {
+                    session_id: id.clone(),
+                    label: combine_label(folder.clone(), branch.as_deref()),
+                    folder,
+                    branch,
+                    state: s.state,
+                    stale: s.stale,
+                    seconds_in_state: now.duration_since(s.state_since).as_secs(),
+                    subagent_count: s.subagent_count,
+                    subagent_seconds: s
+                        .sub_since
+                        .map(|t| now.duration_since(t).as_secs())
+                        .unwrap_or(0),
+                    can_focus: s.terminal_pid.is_some(),
+                    descriptor: s.descriptor.clone(),
+                }
             })
             .collect();
         // Stable, useful ordering: live before stale, then by label.
@@ -665,14 +717,16 @@ impl Engine {
     }
 }
 
-/// Build a human label from a working directory: the git **repo root**'s
-/// basename plus its branch, if the cwd is inside a repo. We walk up from `cwd`
-/// to find the `.git` directory so a subfolder cwd (e.g. `.../proj/src-tauri`)
-/// still shows the project name and branch rather than the subfolder. Falls
-/// back to `basename(cwd)` when no repo is found. No subprocess.
-pub fn label_for(cwd: &str) -> String {
+/// Build a human label from a working directory, structured: the git **repo
+/// root**'s basename plus its branch, if the cwd is inside a repo. We walk up
+/// from `cwd` to find the `.git` directory so a subfolder cwd (e.g.
+/// `.../proj/src-tauri`) still shows the project name and branch rather than
+/// the subfolder. Falls back to `(basename(cwd), None)` when no repo is found.
+/// No subprocess. Shipped as separate parts so renderers never re-parse the
+/// combined string (a folder literally named `foo (bar)` would misparse).
+pub fn label_parts(cwd: &str) -> (String, Option<String>) {
     if cwd.is_empty() {
-        return "session".to_string();
+        return ("session".to_string(), None);
     }
     let path = Path::new(cwd);
 
@@ -682,16 +736,29 @@ pub fn label_for(cwd: &str) -> String {
             .and_then(|s| s.to_str())
             .unwrap_or("session")
             .to_string();
-        return match read_git_branch(&root) {
-            Some(branch) => format!("{base} ({branch})"),
-            None => base,
-        };
+        return (base, read_git_branch(&root));
     }
 
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(cwd)
-        .to_string()
+    (
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(cwd)
+            .to_string(),
+        None,
+    )
+}
+
+/// The combined one-line label: `folder (branch)` or just `folder`.
+pub fn label_for(cwd: &str) -> String {
+    let (folder, branch) = label_parts(cwd);
+    combine_label(folder, branch.as_deref())
+}
+
+fn combine_label(folder: String, branch: Option<&str>) -> String {
+    match branch {
+        Some(b) => format!("{folder} ({b})"),
+        None => folder,
+    }
 }
 
 /// Walk up from `start` to the first ancestor containing a `.git` entry (a
@@ -763,6 +830,77 @@ mod tests {
         assert_eq!(e.rollup(), Rollup::Green);
         e.apply(&ev("SessionEnd", "a"));
         assert_eq!(e.rollup(), Rollup::Grey);
+    }
+
+    /// Labels ship structured (folder + branch), so a directory whose *name*
+    /// looks like the combined form can never be misparsed by a renderer.
+    #[test]
+    fn label_parts_are_structured_not_reparsed() {
+        let base = std::env::temp_dir().join(format!("beacon-label-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // A plain directory literally named "foo (bar)" — folder only, no branch.
+        let odd = base.join("foo (bar)");
+        std::fs::create_dir_all(&odd).unwrap();
+        let (folder, branch) = label_parts(odd.to_str().unwrap());
+        assert_eq!(folder, "foo (bar)");
+        assert_eq!(branch, None);
+
+        // A git repo: folder = repo root basename, branch from .git/HEAD — even
+        // from a subdirectory cwd.
+        let repo = base.join("proj");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let sub = repo.join("src-tauri");
+        std::fs::create_dir_all(&sub).unwrap();
+        let (folder, branch) = label_parts(sub.to_str().unwrap());
+        assert_eq!(folder, "proj");
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(label_for(sub.to_str().unwrap()), "proj (main)");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A straggler heartbeat (e.g. a subagent's late `PostToolUse` /
+    /// `SubagentStop`) arriving after `SessionEnd` must NOT resurrect the row
+    /// — it would sit orange until the stale sweep. A real restart (any
+    /// state-setting event, like `SessionStart` or `UserPromptSubmit`) clears
+    /// the tombstone and recreates the session normally.
+    #[test]
+    fn straggler_heartbeat_after_session_end_does_not_resurrect() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "a"));
+        e.apply(&ev("SessionEnd", "a"));
+        assert!(e.snapshot().is_empty());
+
+        // Late subagent + main-agent heartbeats: dropped, no row.
+        let out = e.apply(&sub_ev("PostToolUse", "a"));
+        assert!(!out.changed, "straggler must not report a change");
+        let out = e.apply(&sub_ev("SubagentStop", "a"));
+        assert!(!out.changed);
+        e.apply(&ev("PostToolBatch", "a"));
+        assert!(e.snapshot().is_empty(), "no resurrection from heartbeats");
+
+        // A genuine restart of the same id still works.
+        e.apply(&ev("SessionStart", "a"));
+        assert_eq!(e.snapshot().len(), 1);
+        assert_eq!(e.rollup(), Rollup::Green);
+
+        // And once restarted, heartbeats flow normally again.
+        e.apply(&ev("UserPromptSubmit", "a"));
+        e.apply(&sub_ev("PostToolUse", "a"));
+        assert_eq!(e.rollup(), Rollup::Orange);
+    }
+
+    /// The tombstone also gives way to `UserPromptSubmit` directly (a resume
+    /// that never re-fires SessionStart).
+    #[test]
+    fn prompt_after_session_end_recreates_session() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "a"));
+        e.apply(&ev("SessionEnd", "a"));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        assert_eq!(e.rollup(), Rollup::Orange);
     }
 
     #[test]

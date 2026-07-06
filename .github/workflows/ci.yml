@@ -14,12 +14,28 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# CI only reads the repo — never grant the default token more than that.
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: Frontend (lint · typecheck · build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # package.json is the single version source (tauri.conf.json reads it
+      # directly; sync-version.mjs copies it into Cargo.toml on release). Catch
+      # a hand-edited Cargo.toml before it ships a mismatched bundle.
+      - name: Check version consistency (package.json ↔ Cargo.toml)
+        run: |
+          NPM_V=$(node -p "require('./package.json').version")
+          CARGO_V=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          if [ "$NPM_V" != "$CARGO_V" ]; then
+            echo "::error::version mismatch: package.json=$NPM_V vs src-tauri/Cargo.toml=$CARGO_V (run npm run release:* — never hand-edit)"
+            exit 1
+          fi
+          echo "version OK: $NPM_V"
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
@@ -66,6 +82,17 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+
+      # License policy: fails if any crate's license falls outside the
+      # deny.toml allowlist, so THIRD_PARTY_LICENSES.md can't silently rot as
+      # Dependabot bumps dependencies. (Runs on macOS only — the license set is
+      # platform-independent; no need to pay for it twice.)
+      - name: cargo-deny (licenses)
+        if: matrix.platform == 'macos-latest'
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          command: check licenses
 
       - name: Rustfmt (check)
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check

@@ -48,7 +48,7 @@ hook() { # hook <EventName> [notification_type]
     exit 1
   fi
 }
-state() { curl -s "http://127.0.0.1:${PORT}/state" \
+state() { curl -s -H "X-Beacon-Token: $TOKEN" "http://127.0.0.1:${PORT}/state" \
   | python3 -c "import sys,json;[print(f\"   {s['label']:<14} {s['state']:<10} agents={s['subagent_count']} t={s['subagent_seconds']}s\") for s in json.load(sys.stdin)['sessions'] if s['session_id']=='$SID']"; }
 pause() { echo "   ⏸  $1"; sleep "${2:-3}"; }
 

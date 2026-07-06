@@ -56,6 +56,9 @@
   --state-working: #f5a742;
   --state-ready: #46c98b;
   --state-none: #7c828d;
+  /* "r, g, b" form of --state-working, derived by applyTheme — lets CSS build
+     alpha variants via rgba(var(--state-working-rgb), a). */
+  --state-working-rgb: 245, 167, 66;
 }
 
 /* The working glyph's outer ring breathes. Shared by webview glyphs. */

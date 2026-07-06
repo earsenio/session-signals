@@ -27,8 +27,9 @@ pub type AuthToken = Arc<Mutex<String>>;
 ///   JSON and invoke `on_event`. A missing/wrong token is rejected with 401 and
 ///   changes no state.
 /// - `GET  /state` → return `state_json()`; a loopback-only health/readback
-///   endpoint used to confirm the rollup without scraping the tray. Read-only
-///   and loopback-bound, so it isn't token-gated (it can't spoof state).
+///   endpoint used to confirm the rollup without scraping the tray. Token-gated
+///   like `/hook`: the snapshot includes session labels, cwd basenames, and
+///   prompt-derived descriptors, which other local processes shouldn't read.
 pub fn start<F, G>(
     port: u16,
     auth: AuthToken,
@@ -59,9 +60,9 @@ where
     Ok(server)
 }
 
-/// Does this request carry the expected `X-Beacon-Token`? Constant in spirit:
-/// we compare the full strings. A blank expected token (shouldn't happen) fails
-/// closed.
+/// Does this request carry the expected `X-Beacon-Token`? Compared in constant
+/// time so a mismatch can't leak how much of the token matched via timing. A
+/// blank expected token (shouldn't happen) fails closed.
 fn token_ok(request: &Request, auth: &AuthToken) -> bool {
     let expected = auth.lock_safe().clone();
     if expected.is_empty() {
@@ -71,8 +72,18 @@ fn token_ok(request: &Request, auth: &AuthToken) -> bool {
         .headers()
         .iter()
         .find(|h| h.field.equiv(token::HEADER))
-        .map(|h| h.value.as_str() == expected)
+        .map(|h| eq_constant_time(h.value.as_str(), &expected))
         .unwrap_or(false)
+}
+
+/// Constant-time string equality (only the length can leak): XOR-fold every
+/// byte pair instead of short-circuiting on the first mismatch.
+fn eq_constant_time(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn handle<F, G>(mut request: Request, auth: &AuthToken, on_event: &F, state_json: &G)
@@ -125,6 +136,14 @@ where
             }
         }
         (Method::Get, "/state") => {
+            // Read-only, but the snapshot carries labels/cwds/prompt-derived
+            // descriptors — gate it behind the same token as /hook.
+            if !token_ok(&request, auth) {
+                let _ = request.respond(
+                    Response::from_string("{\"error\":\"unauthorized\"}").with_status_code(401),
+                );
+                return;
+            }
             let json = state_json();
             let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                 .expect("valid header");
@@ -289,5 +308,69 @@ mod tests {
         );
 
         server.unblock();
+    }
+
+    /// GET /state with an explicit token header value (pass "" to omit).
+    /// Returns (status_line, body).
+    fn get_state_with_token(port: u16, tok: &str) -> (String, String) {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let token_header = if tok.is_empty() {
+            String::new()
+        } else {
+            format!("{}: {}\r\n", token::HEADER, tok)
+        };
+        let req = format!(
+            "GET /state HTTP/1.1\r\nHost: 127.0.0.1\r\n{token_header}Connection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).expect("write");
+        stream.flush().ok();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let text = String::from_utf8_lossy(&buf).to_string();
+        let status = text.lines().next().unwrap_or("").to_string();
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    /// /state is read-only but leaks labels/descriptors, so it's token-gated
+    /// exactly like /hook.
+    #[test]
+    fn state_readback_is_token_gated() {
+        let server = start(
+            0,
+            auth(TEST_TOKEN),
+            |_ev| {},
+            || r#"{"rollup":"green"}"#.to_string(),
+        )
+        .expect("bind ok");
+        let port = bound_port(&server);
+
+        let (status, body) = get_state_with_token(port, "");
+        assert!(status.contains("401"), "no token → 401, got: {status}");
+        assert!(
+            !body.contains("rollup"),
+            "401 must not include the snapshot"
+        );
+
+        let (status, _) = get_state_with_token(port, "wrong");
+        assert!(status.contains("401"), "wrong token → 401, got: {status}");
+
+        let (status, body) = get_state_with_token(port, TEST_TOKEN);
+        assert!(status.contains("200"), "valid token → 200, got: {status}");
+        assert!(
+            body.contains("rollup"),
+            "snapshot returned with valid token"
+        );
+
+        server.unblock();
+    }
+
+    #[test]
+    fn constant_time_eq_matches_plain_eq() {
+        assert!(eq_constant_time("", ""));
+        assert!(eq_constant_time("abc123", "abc123"));
+        assert!(!eq_constant_time("abc123", "abc124"));
+        assert!(!eq_constant_time("abc", "abc1"));
+        assert!(!eq_constant_time("", "x"));
     }
 }

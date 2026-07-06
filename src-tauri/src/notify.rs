@@ -53,14 +53,14 @@ pub fn render_icons(app: &AppHandle, palette: &TrayPalette) {
         (
             State::NeedsYou,
             palette.needs_you,
-            crate::tray::Shape::Square,
+            crate::glyph::Shape::Square,
         ),
-        (State::Working, palette.working, crate::tray::Shape::Dot),
-        (State::Ready, palette.ready, crate::tray::Shape::Check),
+        (State::Working, palette.working, crate::glyph::Shape::Dot),
+        (State::Ready, palette.ready, crate::glyph::Shape::Check),
     ] {
-        let rgba = crate::tray::render_glyph_rgba(shape, rgb, NOTIF_ICON_SIZE);
+        let rgba = crate::glyph::render_glyph_rgba(shape, rgb, NOTIF_ICON_SIZE);
         if let (Some(png), Some(path)) = (
-            crate::tray::encode_png(&rgba, NOTIF_ICON_SIZE),
+            crate::glyph::encode_png(&rgba, NOTIF_ICON_SIZE),
             icon_path(app, state),
         ) {
             let _ = std::fs::write(path, png);
@@ -125,11 +125,12 @@ impl Notifier {
         }
 
         // Design copy: title is "{project} <verb>", body is a short context line.
-        // The project is the folder portion of the label (drop the "(branch)").
+        // The project is the label's folder part (the engine ships it
+        // structured — no re-parsing of the combined label here).
         // A richer body ("waiting for permission" vs "asked a question") would
         // need notification_type plumbed through the engine — out of scope for a
         // presentation pass — so the body is a sensible generic per state.
-        let project = t.label.split(" (").next().unwrap_or(&t.label).to_string();
+        let project = t.folder.clone();
         let (title, body) = match t.to {
             State::NeedsYou => (format!("{project} needs you"), "Waiting for your input."),
             State::Working => (

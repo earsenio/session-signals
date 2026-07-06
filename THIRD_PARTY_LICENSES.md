@@ -130,8 +130,10 @@ These are MIT-compatible and need no replacement; listed for transparency.
 To regenerate / verify this inventory:
 
 ```
-# Rust
-cargo install cargo-deny && cargo deny check licenses
+# Rust — the allowlist lives in src-tauri/deny.toml and CI enforces it on
+# every PR, so a new license family fails the build until it's consciously
+# added there AND documented here.
+cargo install cargo-deny && cargo deny --manifest-path src-tauri/Cargo.toml check licenses
 # npm
 npx license-checker --summary --production
 ```

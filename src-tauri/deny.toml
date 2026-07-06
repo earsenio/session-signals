@@ -1,0 +1,33 @@
+# cargo-deny configuration — license policy for the Rust dependency tree.
+# Run locally with:  cargo deny --manifest-path src-tauri/Cargo.toml check licenses
+# CI runs the same check so THIRD_PARTY_LICENSES.md can't silently drift as
+# Dependabot bumps dependencies. See that file for the human-readable inventory
+# and the rationale for each non-MIT family below.
+
+[licenses]
+# Every license (or OR-elected alternative) that may appear in the tree. Adding
+# a dependency with anything else fails CI — extend the list consciously and
+# update THIRD_PARTY_LICENSES.md in the same change.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  # File-level weak copyleft; unmodified transitive deps — MIT-compatible for
+  # our distribution (cssparser & friends).
+  "MPL-2.0",
+  # Permissive attribution-style (unicode-*/ICU data crates).
+  "Unicode-3.0",
+  # The Fira/Geist-style font licenses never appear in the cargo tree; fonts
+  # are npm-side (see THIRD_PARTY_LICENSES.md).
+]
+# Confidence threshold for license detection from license *texts* (0.8 default).
+confidence-threshold = 0.8
+
+# Only the `licenses` check runs in CI today. The other checks (advisories,
+# bans, sources) are valuable but need their own curation; enable them
+# deliberately, not by default.

@@ -31,16 +31,16 @@ before reporting.
 
 - **Implementation:** binds loopback only (`SocketAddr::from(([127,0,0,1], port))`).
   Defense-in-depth additionally rejects any non-loopback peer with `403`.
-  `POST /hook` requires a matching `X-Beacon-Token` header or returns `401` and
-  changes no state. `GET /state` is read-only and loopback-bound.
-- **Residual risk:** any **local** process or user on the machine can reach the
-  port. The token mitigates spoofing of `/hook`. `GET /state` is intentionally
-  un-gated (read-only, can't spoof state) but exposes session labels (cwd
-  basenames + git branch) to any local reader — relevant on shared/multi-user
-  machines.
-- **Note:** the token comparison is a plain string compare, not constant-time.
-  Local-only reach plus a low-value secret makes timing attacks impractical;
-  hardening to a constant-time compare is optional.
+  Both endpoints require a matching `X-Beacon-Token` header or return `401`:
+  `POST /hook` because it changes state, and the read-only `GET /state` because
+  its snapshot exposes session labels (cwd basenames + git branch) and
+  prompt-derived descriptors — relevant on shared/multi-user machines.
+- **Residual risk:** any **local** process running as the same user can read the
+  token from `~/.claude/settings.json` and pass both gates. The token protects
+  against *other users* on the machine and accidental spoofing, not same-user
+  malware (which could read the transcripts directly anyway).
+- **Note:** the token comparison is constant-time (XOR-fold over the full
+  string), so a mismatch can't leak how much of the token matched via timing.
 
 ### 2. The listener auth token
 
@@ -57,9 +57,11 @@ before reporting.
 - **Implementation:** a **non-destructive merge** — Session Signals' hooks are identified
   *structurally* (an HTTP hook to the loopback `/hook`, or the `command` capture
   hook carrying the `beacon-capture` marker), never by clobbering unrelated keys.
-  A **one-time backup** is written to `settings.json.beacon.bak` before any
-  change. Uninstall strips only Session Signals' entries and prunes emptied arrays. A
-  present-but-unparseable settings file is refused, not overwritten.
+  Writes are **atomic** (write-temp-then-rename, so a crash can't truncate the
+  file), and a copy of the previous version is kept at
+  `settings.json.beacon.bak` before each write. Uninstall strips only Session
+  Signals' entries and prunes emptied arrays. A present-but-unparseable settings
+  file is refused, not overwritten.
 - **Residual risk:** Session Signals also installs a **`command` hook**
   (`beacon-capture.sh` / `.ps1`) that runs on `SessionStart`. It is auto-generated
   into app-data and registered to run; it walks the process tree to find the

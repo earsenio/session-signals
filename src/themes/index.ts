@@ -33,6 +33,10 @@ export function applyThemeToDom(theme: Theme): void {
   root.style.setProperty("--state-working", s.working);
   root.style.setProperty("--state-ready", s.ready);
   root.style.setProperty("--state-none", theme.palette.stale);
+  // Derived "r, g, b" form so CSS can build alpha variants of the working
+  // color (rgba(var(--state-working-rgb), 0.09)) — theme authors never set
+  // this themselves.
+  root.style.setProperty("--state-working-rgb", hexToRgb(s.working).join(", "));
 }
 
 /// Convert "#rrggbb" → [r, g, b]. Tolerates a leading '#' and 3-digit shorthand.

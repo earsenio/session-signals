@@ -22,6 +22,8 @@ jobs:
   release:
     permissions:
       contents: write # create the Release and upload assets
+      id-token: write # sign the build-provenance attestation (OIDC)
+      attestations: write # store the attestation
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +63,7 @@ jobs:
       - name: Build and release
         # tauri-action v1 is the stable line for Tauri 2; it builds the bundles
         # (frontend + Rust) and creates/uploads to the GitHub Release.
+        id: tauri
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -94,3 +97,39 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      # The installers ship unsigned until signing secrets are configured, so a
+      # checksum file (+ the provenance attestation below) is the only integrity
+      # story users have. One SHA256SUMS-<os>.txt per matrix job; uploaded via
+      # the release id (drafts aren't reliably addressable by tag).
+      - name: Generate and upload SHA256 checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS: ${{ steps.tauri.outputs.artifactPaths }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+          OUT="SHA256SUMS-$(echo '${{ matrix.platform }}' | cut -d- -f1).txt"
+          printf '%s' "$ARTIFACTS" | node -e '
+            const paths = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            console.log(paths.join("\n"));
+          ' | while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            # Record the bare filename, not the runner's absolute path.
+            (cd "$(dirname "$f")" && sum "$(basename "$f")") >> "$OUT"
+          done
+          cat "$OUT"
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: text/plain" \
+            --data-binary @"$OUT" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$OUT" >/dev/null
+          echo "uploaded $OUT to release $RELEASE_ID"
+
+      # Signed provenance: proves each installer was built by THIS workflow from
+      # THIS commit (verifiable with `gh attestation verify <file> -R <repo>`).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ join(fromJSON(steps.tauri.outputs.artifactPaths), ', ') }}

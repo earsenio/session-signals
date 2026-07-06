@@ -173,13 +173,14 @@ body {
   display: inline-flex;
 }
 
-/* Soft amber halo — always amber (#F5A742) regardless of the row's state. */
+/* Soft halo in the theme's *working* color — kept working-colored regardless
+   of the row's own state (it signals subagent activity, not the row state). */
 .wBusyHalo {
   position: absolute;
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: #f5a742;
+  background: var(--state-working);
   filter: blur(7px);
   opacity: 0.32;
   animation: beaconBusyHalo 2.4s ease-in-out infinite;
@@ -191,8 +192,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(245, 167, 66, 0.09);
-  border: 1px solid rgba(245, 167, 66, 0.2);
+  background: rgba(var(--state-working-rgb), 0.09);
+  border: 1px solid rgba(var(--state-working-rgb), 0.2);
   border-radius: 8px;
   padding: 6px 10px;
 }
@@ -201,7 +202,7 @@ body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #f5a742;
+  background: var(--state-working);
   animation: beaconBusyDot 1.8s ease-in-out infinite;
   flex: none;
 }

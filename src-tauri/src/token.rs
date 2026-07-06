@@ -22,24 +22,16 @@ const TOKEN_KEY: &str = "auth_token";
 pub const HEADER: &str = "X-Beacon-Token";
 
 /// Mint a new URL-safe token: 32 random bytes rendered as 64 hex chars. Hex is
-/// inherently URL/header-safe (no quoting needed in JSON or HTTP). Falls back to
-/// a time-seeded value only if the OS RNG is somehow unavailable — extremely
-/// unlikely, and still better than a fixed string.
+/// inherently URL/header-safe (no quoting needed in JSON or HTTP). Fails closed:
+/// if the OS CSPRNG is unavailable (effectively impossible on the desktop OSes
+/// we ship to), we abort rather than mint a predictable secret.
 pub fn generate() -> String {
+    use std::fmt::Write;
     let mut bytes = [0u8; 32];
-    if getrandom::getrandom(&mut bytes).is_err() {
-        // Degraded fallback: still 32 varied bytes, not a constant.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = ((nanos >> (i % 16 * 8)) as u8) ^ (i as u8).wrapping_mul(31);
-        }
-    }
+    getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable — refusing to mint a weak token");
     let mut s = String::with_capacity(64);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }

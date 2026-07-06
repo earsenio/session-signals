@@ -7,7 +7,13 @@ export type Rollup = "red" | "orange" | "green" | "grey";
 
 export interface SessionView {
   session_id: string;
+  /// Combined one-line label ("folder (branch)" or "folder") — for plain-text
+  /// surfaces; the widget's two-tone row uses the structured parts below.
   label: string;
+  /// The label's structured parts, shipped by the engine so the UI never
+  /// re-parses `label` (a folder literally named "foo (bar)" would misparse).
+  folder: string;
+  branch: string | null;
   state: SessionState;
   stale: boolean;
   seconds_in_state: number;

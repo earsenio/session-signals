@@ -90,17 +90,37 @@ pub fn hook_block_string(port: u16, token: &str) -> String {
 
 /// Is this individual hook object one of Session Signals'? We recognize two shapes
 /// structurally (no marker written into the user's file):
-/// - an `http` hook posting to our loopback `/hook` endpoint, and
+/// - an `http` hook posting to our loopback `/hook` endpoint (port-agnostic, so
+///   recognition survives a port change), and
 /// - the `command` capture hook, whose command contains the `beacon-capture`
 ///   marker (see `capture.rs`).
+///
+/// To avoid claiming (and deleting) another local tool's hook that merely also
+/// posts to a loopback `/hook` URL, an http hook that carries headers is only
+/// ours if they include our `X-Beacon-Token` key. A *headerless* loopback
+/// `/hook` entry is still claimed: that's the exact shape pre-token Session
+/// Signals installs left behind, and the startup token auto-repair must be able
+/// to find and fix those.
 fn is_our_hook(hook: &Value) -> bool {
     match hook.get("type").and_then(Value::as_str) {
-        Some("http") => match hook.get("url").and_then(Value::as_str) {
-            Some(url) => {
-                url.ends_with("/hook") && (url.contains("127.0.0.1") || url.contains("localhost"))
-            }
-            None => false,
-        },
+        Some("http") => {
+            let url_matches = hook
+                .get("url")
+                .and_then(Value::as_str)
+                .map(|url| {
+                    url.ends_with("/hook")
+                        && (url.contains("127.0.0.1") || url.contains("localhost"))
+                })
+                .unwrap_or(false);
+            url_matches
+                && match hook.get("headers") {
+                    None => true, // pre-token Session Signals shape
+                    Some(headers) => headers
+                        .as_object()
+                        .map(|h| h.contains_key(crate::token::HEADER))
+                        .unwrap_or(false),
+                }
+        }
         Some("command") => hook
             .get("command")
             .and_then(Value::as_str)
@@ -428,6 +448,41 @@ mod tests {
             return current != Some(token);
         }
         false
+    }
+
+    #[test]
+    fn foreign_loopback_hooks_with_own_headers_are_not_claimed() {
+        // Another tool's hook on a loopback `/hook` URL, identified by its own
+        // header — must NOT be recognized as ours (we'd delete it on install).
+        let foreign: Value = serde_json::from_str(
+            r#"{ "type": "http", "url": "http://127.0.0.1:9999/hook",
+                 "headers": { "X-Other-Tool": "abc" }, "timeout": 5 }"#,
+        )
+        .unwrap();
+        assert!(!is_our_hook(&foreign));
+
+        // Malformed headers value (not an object) → not ours either.
+        let odd: Value = serde_json::from_str(
+            r#"{ "type": "http", "url": "http://127.0.0.1:4317/hook", "headers": "x" }"#,
+        )
+        .unwrap();
+        assert!(!is_our_hook(&odd));
+
+        // Ours (token header) and the pre-token headerless shape ARE claimed.
+        assert!(is_our_hook(&our_group(4317, "tok")["hooks"][0]));
+        let pre_token: Value = serde_json::from_str(
+            r#"{ "type": "http", "url": "http://127.0.0.1:4317/hook", "timeout": 10 }"#,
+        )
+        .unwrap();
+        assert!(is_our_hook(&pre_token));
+
+        // Non-loopback host is never ours, token header or not.
+        let remote: Value = serde_json::from_str(
+            r#"{ "type": "http", "url": "http://example.com/hook",
+                 "headers": { "X-Beacon-Token": "tok" } }"#,
+        )
+        .unwrap();
+        assert!(!is_our_hook(&remote));
     }
 
     #[test]

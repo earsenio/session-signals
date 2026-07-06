@@ -41,6 +41,11 @@ waiting. Session Signals surfaces all of them in one place:
 - **Windows** — `.msi` / `.exe`. Click through the SmartScreen "More info →
   Run anyway" prompt (unsigned).
 
+Since the installers are unsigned, each release ships `SHA256SUMS-*.txt`
+checksum files, and every artifact carries a signed [build provenance
+attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+you can verify with `gh attestation verify <file> -R earsenio/session-signals`.
+
 Prefer to build it yourself? See [Build from source](#build-from-source).
 
 ## Set up Claude Code hooks

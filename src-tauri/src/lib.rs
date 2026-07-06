@@ -10,6 +10,7 @@ pub mod config;
 pub mod descriptor;
 pub mod engine;
 pub mod focus;
+mod glyph;
 pub mod hooks;
 mod listener;
 mod notify;
