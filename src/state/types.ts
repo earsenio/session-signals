@@ -14,6 +14,9 @@ export interface SessionView {
   /// re-parses `label` (a folder literally named "foo (bar)" would misparse).
   folder: string;
   branch: string | null;
+  /// True when the session's cwd is a linked git worktree. The UI shows a subtle
+  /// marker so it's distinguishable from a checkout of the same repo.
+  worktree: boolean;
   state: SessionState;
   stale: boolean;
   seconds_in_state: number;

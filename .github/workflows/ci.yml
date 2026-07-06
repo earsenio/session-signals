@@ -1,9 +1,9 @@
 name: CI
 
 # Validates every PR and every push to main: frontend lint/typecheck/build on
-# Linux, and the Rust shell (fmt + clippy + tests + a compile smoke) on the two
-# shipping targets, macOS and Windows. The release workflow (release.yml) stays
-# tag-triggered and separate.
+# Linux, the Rust shell (fmt + clippy + tests + a compile smoke) on the two
+# shipping targets, macOS and Windows, and a cargo-deny license check on Linux.
+# The release workflow (release.yml) stays tag-triggered and separate.
 on:
   pull_request:
   push:
@@ -83,17 +83,6 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      # License policy: fails if any crate's license falls outside the
-      # deny.toml allowlist, so THIRD_PARTY_LICENSES.md can't silently rot as
-      # Dependabot bumps dependencies. (Runs on macOS only — the license set is
-      # platform-independent; no need to pay for it twice.)
-      - name: cargo-deny (licenses)
-        if: matrix.platform == 'macos-latest'
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: src-tauri/Cargo.toml
-          command: check licenses
-
       - name: Rustfmt (check)
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
       - name: Clippy (deny warnings)
@@ -102,3 +91,18 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Build (compile smoke)
         run: cargo build --manifest-path src-tauri/Cargo.toml
+
+  # License policy: fails if any crate's license falls outside the deny.toml
+  # allowlist, so THIRD_PARTY_LICENSES.md can't silently rot as Dependabot bumps
+  # dependencies. The license set is platform-independent, so this runs once on
+  # Linux — where cargo-deny-action's container is supported (it cannot run on
+  # the macOS/Windows runners the Rust shell job uses).
+  deny:
+    name: cargo-deny (licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          command: check licenses
