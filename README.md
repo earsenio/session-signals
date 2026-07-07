@@ -15,7 +15,6 @@ shows one row per live session — each colored as it moves between
 inspection, fully local.
 
 <img width="392" height="378" alt="Screenshot 2026-06-28 at 7 06 21 PM" src="https://github.com/user-attachments/assets/d21d7027-6faa-4d60-b267-a791d9501e02" />
-<img width="572" height="901" alt="Screenshot 2026-06-28 at 7 10 17 PM" src="https://github.com/user-attachments/assets/1f21f5ef-80cd-4bef-b6f9-d76eeb173743" />
 
 ---
 
