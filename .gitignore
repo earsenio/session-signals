@@ -35,6 +35,8 @@ pnpm-debug.log*
 # Claude Code — per-user local settings (machine paths + permission allowlist).
 # Never commit: the shared .claude/settings.json is fine, the *.local.json is not.
 .claude/settings.local.json
+# Ephemeral per-worktree session state written by concurrent Claude Code sessions.
+.claude/worktrees/
 
 # Internal scaffolding (design briefs, build prompts, planning docs) — kept in the
 # tree for contributors locally but not published as user-facing docs.
