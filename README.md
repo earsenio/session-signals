@@ -35,8 +35,21 @@ waiting. Session Signals surfaces all of them in one place:
 
 **Download a release build** from the [Releases page](https://github.com/earsenio/session-signals/releases):
 
-- **macOS** — `.dmg` (universal). Builds are currently **unsigned**: on first
-  launch, right-click the app → **Open** to bypass Gatekeeper.
+- **macOS** — `.dmg` (universal). Builds are currently **unsigned**, so the
+  first launch shows a Gatekeeper dialog saying Apple can't verify the app.
+  To open it anyway (macOS 15+ removed the old right-click → Open bypass):
+  1. Open the app once and dismiss the dialog with **Done** (not "Move to
+     Trash").
+  2. Go to **System Settings → Privacy & Security**, scroll down to the
+     *"Session Signals" was blocked…* notice, click **Open Anyway**, and
+     authenticate. macOS remembers the choice.
+
+  Or, from a terminal, clear the quarantine flag instead:
+
+  ```bash
+  xattr -dr com.apple.quarantine "/Applications/Session Signals.app"
+  ```
+
 - **Windows** — `.msi` / `.exe`. Click through the SmartScreen "More info →
   Run anyway" prompt (unsigned).
 
