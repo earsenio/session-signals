@@ -130,6 +130,6 @@ jobs:
       # Signed provenance: proves each installer was built by THIS workflow from
       # THIS commit (verifiable with `gh attestation verify <file> -R <repo>`).
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ join(fromJSON(steps.tauri.outputs.artifactPaths), ', ') }}
