@@ -5,9 +5,22 @@ name: CI
 # shipping targets, macOS and Windows, and a cargo-deny license check on Linux.
 # The release workflow (release.yml) stays tag-triggered and separate.
 on:
+  # Every PR runs the full matrix unconditionally — those jobs are the ruleset's
+  # required checks, so path-filtering PRs would leave a docs-only PR stuck
+  # "waiting for status" and unmergeable. Filter the push side only.
   pull_request:
   push:
     branches: [main]
+    # A commit whose files are ALL docs-only can't affect the build, lint, or
+    # tests, so skip the (redundant, already-PR-validated) re-run. A mixed commit
+    # that also touches code still runs — paths-ignore only skips when every
+    # changed path matches.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "prompts/**"
+      - "LICENSE"
+      - ".gitignore"
 
 # A newer push to the same ref cancels the in-flight run.
 concurrency:
