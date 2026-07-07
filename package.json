@@ -1,7 +1,7 @@
 {
   "name": "cc-beacon",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Session Signals — a lightweight, fully-local desktop status indicator for Claude Code.",
   "license": "MIT",
   "author": "Session Signals contributors",
