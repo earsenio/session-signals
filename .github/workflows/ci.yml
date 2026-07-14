@@ -50,7 +50,7 @@ jobs:
           fi
           echo "version OK: $NPM_V"
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -78,7 +78,7 @@ jobs:
       # The Tauri app crate embeds the built frontend via generate_context!, so
       # `dist/` must exist before the Rust crate will compile (clippy/test/build).
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
