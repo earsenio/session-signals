@@ -105,6 +105,14 @@ pub struct HookEvent {
     /// Captured for display/debugging; not currently used for state logic.
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// The tool being invoked, present on `PreToolUse` / `PostToolUse`. Drives
+    /// detection of user-blocking tools (`AskUserQuestion`, `ExitPlanMode`) that
+    /// halt on the user the instant they start yet emit no `Notification` the
+    /// listener can see — so the session must be read as NeedsYou, not Working,
+    /// while one is pending. See `is_blocking_tool` and the `PreToolUse` /
+    /// `PostToolUse` arms in `apply`.
+    #[serde(default)]
+    pub tool_name: Option<String>,
     /// Present only on the synthetic `BeaconTerminal` event from the capture
     /// hook: the owning terminal app's pid and name.
     #[serde(default)]
@@ -274,8 +282,25 @@ impl Engine {
             // (`/compact` fires PreCompact, never UserPromptSubmit, which is why
             // it used to stay green.) A subagent's tool call must NOT flip the
             // parent's color, so it heartbeats instead.
-            "UserPromptSubmit" | "UserPromptExpansion" | "PreToolUse" | "PreCompact" => {
+            "UserPromptSubmit" | "UserPromptExpansion" | "PreCompact" => {
                 if is_subagent {
+                    self.heartbeat(ev)
+                } else {
+                    self.transition_to(ev, State::Working)
+                }
+            }
+            // A tool call is starting. Most tools mean the agent is actively
+            // running (→ Working), but the *blocking* tools — `AskUserQuestion`,
+            // `ExitPlanMode` — halt on the user the moment they fire and emit no
+            // Notification the listener sees, so the session sits silently at
+            // Working ("orange") while it's really blocked. Escalate those to
+            // NeedsYou. Like a permission gate (see `Notification`), a block is a
+            // block regardless of `is_subagent`. Their `PostToolUse` (the user
+            // answered) resumes Working below.
+            "PreToolUse" => {
+                if is_blocking_tool(ev.tool_name.as_deref()) {
+                    self.transition_to(ev, State::NeedsYou)
+                } else if is_subagent {
                     self.heartbeat(ev)
                 } else {
                     self.transition_to(ev, State::Working)
@@ -300,7 +325,19 @@ impl Engine {
             // landing spot for any main-agent work-start / terminal event that
             // arrived from a subagent (`is_subagent`) — those keep the session
             // live without recoloring it.
-            "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" => self.heartbeat(ev),
+            // A blocking tool returning means the user just answered (chose an
+            // option / approved the plan) and the MAIN agent resumes work — flip
+            // the row off NeedsYou back to Working. Every other PostToolUse is a
+            // plain heartbeat (keep the current state). A subagent's PostToolUse
+            // never recolors the parent (it can't own a blocking tool anyway).
+            "PostToolUse" => {
+                if !is_subagent && is_blocking_tool(ev.tool_name.as_deref()) {
+                    self.transition_to(ev, State::Working)
+                } else {
+                    self.heartbeat(ev)
+                }
+            }
+            "PostToolUseFailure" | "PostToolBatch" => self.heartbeat(ev),
             "Notification" => match ev.notification_type.as_deref() {
                 // Only a genuine block on the user is "Needs you". This is the one
                 // state a subagent IS allowed to set: if a fanned-out subagent hits
@@ -722,6 +759,20 @@ impl Engine {
     }
 }
 
+/// Tools that block on the user the instant they start and emit no
+/// `Notification` the listener can observe, so the session would otherwise sit
+/// at Working ("orange") while it is really blocked waiting for you:
+/// - `AskUserQuestion` — the multiple-choice prompt.
+/// - `ExitPlanMode` — plan approval.
+///
+/// `PreToolUse` for these escalates the session to NeedsYou; their `PostToolUse`
+/// (the user answered) resumes Working. Kept as a single predicate so the set is
+/// defined in exactly one place. Matched case-sensitively against Claude Code's
+/// canonical tool names.
+fn is_blocking_tool(tool_name: Option<&str>) -> bool {
+    matches!(tool_name, Some("AskUserQuestion") | Some("ExitPlanMode"))
+}
+
 /// Repo facts derived from a working directory, used to build the session label
 /// and the worktree marker. Pure filesystem reads — no subprocess.
 struct GitInfo {
@@ -903,6 +954,15 @@ mod tests {
         HookEvent {
             agent_id: Some("sub-1".to_string()),
             agent_type: Some("Explore".to_string()),
+            ..ev(name, sid)
+        }
+    }
+
+    /// A `PreToolUse`/`PostToolUse` event carrying a `tool_name` — used to test
+    /// the blocking-tool (`AskUserQuestion`/`ExitPlanMode`) escalation.
+    fn tool_ev(name: &str, sid: &str, tool: &str) -> HookEvent {
+        HookEvent {
+            tool_name: Some(tool.to_string()),
             ..ev(name, sid)
         }
     }
@@ -1357,6 +1417,93 @@ mod tests {
             state_of(&e, "a"),
             State::NeedsYou,
             "subagent block still needs the user"
+        );
+    }
+
+    // --- Blocking tools (AskUserQuestion / ExitPlanMode) escalate to NeedsYou ---
+
+    #[test]
+    fn ask_user_question_turns_red() {
+        // The reported bug: an AskUserQuestion prompt blocks on the user but emits
+        // no Notification, so the session used to sit at Working ("orange"). Its
+        // `PreToolUse` must now escalate to NeedsYou ("red").
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        assert_eq!(e.rollup(), Rollup::Orange);
+        let out = e.apply(&tool_ev("PreToolUse", "a", "AskUserQuestion"));
+        assert_eq!(state_of(&e, "a"), State::NeedsYou);
+        assert_eq!(e.rollup(), Rollup::Red);
+        // It's a real transition (Working → NeedsYou), so a notification fires once.
+        let t = out.transition.expect("escalation is a transition");
+        assert_eq!(t.from, Some(State::Working));
+        assert_eq!(t.to, State::NeedsYou);
+    }
+
+    #[test]
+    fn exit_plan_mode_turns_red() {
+        // Plan approval blocks on the user the same way.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        e.apply(&tool_ev("PreToolUse", "a", "ExitPlanMode"));
+        assert_eq!(state_of(&e, "a"), State::NeedsYou);
+    }
+
+    #[test]
+    fn answering_blocking_tool_resumes_working() {
+        // The user answers → the tool returns (PostToolUse for the same tool) →
+        // the main agent resumes, so the row goes NeedsYou → Working, not stuck red.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&tool_ev("PreToolUse", "a", "AskUserQuestion"));
+        assert_eq!(state_of(&e, "a"), State::NeedsYou);
+        e.apply(&tool_ev("PostToolUse", "a", "AskUserQuestion"));
+        assert_eq!(
+            state_of(&e, "a"),
+            State::Working,
+            "answered question resumes Working"
+        );
+    }
+
+    #[test]
+    fn ordinary_tool_still_only_working() {
+        // A non-blocking tool must behave exactly as before: PreToolUse → Working,
+        // PostToolUse → heartbeat (keep state). No accidental red.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&tool_ev("PreToolUse", "a", "Bash"));
+        assert_eq!(state_of(&e, "a"), State::Working);
+        e.apply(&tool_ev("PostToolUse", "a", "Bash"));
+        assert_eq!(state_of(&e, "a"), State::Working);
+        // A tool-less PreToolUse (tool_name absent) is still plain Working.
+        e.apply(&ev("PreToolUse", "b"));
+        assert_eq!(state_of(&e, "b"), State::Working);
+    }
+
+    #[test]
+    fn subagent_blocking_tool_still_escalates() {
+        // A block is a block: even if a subagent somehow owns the blocking tool,
+        // the user must still be flagged (mirrors the permission-gate exception).
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("UserPromptSubmit", "a"));
+        let mut block = tool_ev("PreToolUse", "a", "AskUserQuestion");
+        block.agent_id = Some("sub-1".to_string());
+        e.apply(&block);
+        assert_eq!(state_of(&e, "a"), State::NeedsYou);
+    }
+
+    #[test]
+    fn subagent_post_blocking_tool_does_not_clear_needs_you() {
+        // Guard the PostToolUse path: a subagent's PostToolUse for a blocking tool
+        // must NOT flip a genuinely-blocked parent to Working (only the main
+        // agent's answer does).
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&notif("a", "permission_prompt"));
+        assert_eq!(state_of(&e, "a"), State::NeedsYou);
+        let mut sub_post = tool_ev("PostToolUse", "a", "AskUserQuestion");
+        sub_post.agent_id = Some("sub-1".to_string());
+        e.apply(&sub_post);
+        assert_eq!(
+            state_of(&e, "a"),
+            State::NeedsYou,
+            "subagent PostToolUse kept the parent red"
         );
     }
 
