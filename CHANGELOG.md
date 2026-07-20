@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A session blocked on an `AskUserQuestion` prompt or plan approval
+  (`ExitPlanMode`) now turns **Needs you** (red) and notifies, instead of
+  sitting at **Working** (orange). These tools block on you the moment they fire
+  but emit no notification the listener can see, so the engine now escalates on
+  their `PreToolUse` and returns to **Working** once you answer.
+
 ## [0.3.0] - 2026-06-29
 
 First open-source-ready release: the per-session descriptor feature plus a full
