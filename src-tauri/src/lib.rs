@@ -12,6 +12,7 @@ pub mod engine;
 pub mod focus;
 mod glyph;
 pub mod hooks;
+pub mod ignore;
 mod listener;
 mod notify;
 pub mod token;
@@ -20,6 +21,7 @@ mod windows;
 
 use config::Config;
 use engine::{CapturedTerminal, Engine, HookEvent, Rollup, SessionView, Transition};
+use ignore::IgnoreRules;
 use notify::Notifier;
 use serde::Serialize;
 use std::sync::mpsc::Sender;
@@ -193,11 +195,23 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
     // Derive the session descriptor from its transcript (debounced; bounded file
     // read done off the engine lock). A change is worth a UI refresh too.
     let desc_changed = maybe_refresh_descriptor(app, &ev);
-    if outcome.changed || desc_changed {
+    // First-prompt ignore rule (B): read the transcript head once, off-lock, and
+    // hide the session if it opens with a known headless note. A newly-hidden
+    // session must drop out of the widget/tray, so a change is worth a refresh.
+    let hidden_changed = maybe_refresh_hidden(app, &ev);
+    if outcome.changed || desc_changed || hidden_changed {
         refresh(app);
     }
     if let Some(t) = outcome.transition {
-        on_transition(app, &t);
+        // Never notify for a filtered (headless/machine-spawned) session.
+        let hidden = {
+            let state = app.state::<AppState>();
+            let eng = state.engine.lock_safe();
+            eng.is_hidden(&t.session_id)
+        };
+        if !hidden {
+            on_transition(app, &t);
+        }
     }
 }
 
@@ -242,6 +256,33 @@ fn maybe_refresh_descriptor(app: &AppHandle, ev: &HookEvent) -> bool {
     let value = descriptor::extract(path);
     let mut eng = state.engine.lock_safe();
     eng.set_descriptor(&ev.session_id, value)
+}
+
+/// First-prompt ignore rule (B): when a `first_prompt_prefix` matcher exists and
+/// the session isn't already hidden by a (cheaper) cwd rule, read the transcript
+/// **head** once — off the engine lock — and record the session's first prompt so
+/// the engine can hide it if it opens with a known headless note. Returns whether
+/// the session's hidden-ness changed (worth a UI refresh). A cheap no-op in the
+/// common case: no B-rule configured, already hidden by cwd, already checked, or
+/// a synthetic event with no transcript.
+fn maybe_refresh_hidden(app: &AppHandle, ev: &HookEvent) -> bool {
+    let Some(path) = ev.transcript_path.as_deref() else {
+        return false;
+    };
+    if ev.session_id.is_empty() {
+        return false;
+    }
+    let state = app.state::<AppState>();
+    {
+        let eng = state.engine.lock_safe();
+        if !eng.first_prompt_due(&ev.session_id) {
+            return false;
+        }
+    }
+    // Bounded head read — lock intentionally NOT held here.
+    let value = descriptor::first_prompt(path);
+    let mut eng = state.engine.lock_safe();
+    eng.set_first_prompt(&ev.session_id, value)
 }
 
 /// Build and start a listener on `port`. The hook callback does the minimum —
@@ -365,12 +406,20 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
         }
     }
 
-    // 4. Stale timeout + idle-drop window.
+    // 4. Stale timeout + idle-drop window + session ignore rules.
     if new.stale_timeout_min != old.stale_timeout_min || new.idle_drop_min != old.idle_drop_min {
         let state = app.state::<AppState>();
         let mut eng = state.engine.lock_safe();
         eng.set_stale_timeout(Duration::from_secs(new.stale_timeout_min * 60));
         eng.set_drop_timeout(Duration::from_secs(new.idle_drop_min * 60));
+    }
+    if new.ignore_rules != old.ignore_rules {
+        let state = app.state::<AppState>();
+        let mut eng = state.engine.lock_safe();
+        eng.set_ignore_rules(IgnoreRules::new(new.ignore_rules.clone()));
+        drop(eng);
+        // Re-judged sessions may drop out of (or back into) the widget/tray.
+        refresh(&app);
     }
 
     // 5. Persist + update live config.
@@ -618,6 +667,7 @@ pub fn run() {
                 let mut eng = state.engine.lock_safe();
                 eng.set_stale_timeout(Duration::from_secs(cfg.stale_timeout_min * 60));
                 eng.set_drop_timeout(Duration::from_secs(cfg.idle_drop_min * 60));
+                eng.set_ignore_rules(IgnoreRules::new(cfg.ignore_rules.clone()));
                 drop(eng);
                 *state.config.lock_safe() = cfg.clone();
                 *state.tray_palette.lock_safe() = palette;
