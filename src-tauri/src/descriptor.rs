@@ -26,6 +26,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 /// Only ever read this many bytes from the tail of a transcript.
 const MAX_TAIL_BYTES: u64 = 512 * 1024;
+/// Only ever read this many bytes from the *head* of a transcript when resolving
+/// the first prompt (the earliest records are at the start, so a small window is
+/// plenty). Used by the first-prompt ignore rule (`ignore::Matcher`).
+const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// Cap the descriptor length so a long fallback prompt can't blow out the row.
 const MAX_LEN: usize = 80;
 
@@ -44,6 +48,56 @@ pub fn extract(transcript_path: &str) -> Option<String> {
     file.take(MAX_TAIL_BYTES).read_to_end(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf);
     extract_from_str(&text)
+}
+
+/// Read a transcript's **head** and return the session's *first* prompt — the
+/// earliest queued/typed instruction — or `None` if unresolved. Used by the
+/// first-prompt ignore rule to recognize headless `--print` sessions by their
+/// injected opening note. Deliberately anchored to the first record so an
+/// ordinary session that merely quotes the phrase later is never matched.
+pub fn first_prompt(transcript_path: &str) -> Option<String> {
+    let mut file = File::open(transcript_path).ok()?;
+    let mut buf = vec![0u8; MAX_HEAD_BYTES];
+    let n = file.read(&mut buf).ok()?;
+    buf.truncate(n);
+    let text = String::from_utf8_lossy(&buf);
+    first_prompt_from_str(&text)
+}
+
+/// Pure core of [`first_prompt`]: return the content of the earliest record that
+/// is a queued instruction (`queue-operation`/`enqueue`) or a genuine human
+/// `user` prompt, skipping slash-command/hook wrappers. File-free for testing.
+fn first_prompt_from_str(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            // The queued initial instruction (how headless runs are seeded).
+            Some("queue-operation") => {
+                if v.get("operation").and_then(|o| o.as_str()) == Some("enqueue") {
+                    if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
+                        if !is_wrapper(c) {
+                            return Some(c.to_string());
+                        }
+                    }
+                }
+            }
+            // Or the first genuinely human-typed prompt.
+            Some("user") => {
+                if let Some(p) = human_prompt(&v) {
+                    return Some(p);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The pure parsing core (transcript text in, descriptor out) — file-free so it
@@ -256,6 +310,44 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         // A missing path is a clean None, never a panic.
         assert_eq!(extract("/no/such/transcript.jsonl"), None);
+    }
+
+    #[test]
+    fn first_prompt_takes_earliest_enqueue() {
+        // A headless run: the earliest record is the queued non-interactive note.
+        let t = r#"
+{"type":"queue-operation","operation":"enqueue","content":"IMPORTANT: You are running in non-interactive --print mode. Do the thing."}
+{"type":"user","message":{"role":"user","content":"a later message"}}
+"#;
+        assert_eq!(
+            first_prompt_from_str(t).as_deref(),
+            Some("IMPORTANT: You are running in non-interactive --print mode. Do the thing.")
+        );
+    }
+
+    #[test]
+    fn first_prompt_falls_back_to_first_human_user() {
+        // No enqueue record: take the first real human prompt, skipping sidechain
+        // noise, tool-result arrays, and slash-command wrappers.
+        let t = r#"
+{"type":"user","isSidechain":true,"message":{"role":"user","content":"subagent noise"}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}
+{"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>"}}
+{"type":"user","message":{"role":"user","content":"the real first prompt"}}
+"#;
+        assert_eq!(
+            first_prompt_from_str(t).as_deref(),
+            Some("the real first prompt")
+        );
+    }
+
+    #[test]
+    fn first_prompt_none_when_no_prompt() {
+        assert_eq!(first_prompt_from_str(""), None);
+        assert_eq!(
+            first_prompt_from_str("{\"type\":\"assistant\"}\nnot json"),
+            None
+        );
     }
 
     #[test]

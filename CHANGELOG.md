@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Session ignore rules — hide non-interactive / machine-spawned Claude Code
+  sessions (e.g. ECC headless `claude --print` "homunculus" agents, which appear
+  with a hex project-dir name and a standard non-interactive opening note) from
+  the widget list and the tray rollup. Hidden sessions stay tracked but never
+  colour the tray or fire notifications.
+- Ignore rules are data-driven via the new `config.ignore_rules` — three matcher
+  kinds (`cwd_contains`, `folder_hex`, and an anchored `first_prompt_prefix`)
+  with shipped defaults for the known pattern. Edit them to adapt to a new
+  spawner without a rebuild; set `ignore_rules` to `[]` to disable.
+
 ## [0.3.0] - 2026-06-29
 
 First open-source-ready release: the per-session descriptor feature plus a full
