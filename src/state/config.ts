@@ -8,6 +8,15 @@ export interface StateNotify {
   sound_name: string;
 }
 
+/// One session-ignore matcher. Mirrors the serde-tagged Rust `ignore::Matcher`
+/// (src-tauri/src/ignore.rs): the `kind` discriminant plus that kind's fields.
+/// Hides non-interactive / machine-spawned sessions (e.g. ECC headless
+/// `claude --print` agents) from the widget and tray rollup.
+export type IgnoreMatcher =
+  | { kind: "cwd_contains"; value: string }
+  | { kind: "folder_hex"; min_len: number }
+  | { kind: "first_prompt_prefix"; value: string };
+
 export interface Config {
   version: number;
   port: number;
@@ -25,6 +34,12 @@ export interface Config {
   needs_you: StateNotify;
   working: StateNotify;
   ready: StateNotify;
+  /// Rules that hide non-interactive / machine-spawned sessions from the widget
+  /// and tray rollup. There's no editor UI yet, so this is a typed passthrough:
+  /// the settings window loads it via `get_config` and carries it verbatim
+  /// through every `set_config` save, so a save never silently drops the user's
+  /// rules. `[]` disables filtering. See `ignore::Matcher` in the Rust backend.
+  ignore_rules: IgnoreMatcher[];
 }
 
 /// Built-in notification sounds offered in the UI (macOS system sound names).
@@ -42,4 +57,11 @@ export const DEFAULT_CONFIG: Config = {
   needs_you: { enabled: true, sound: false, sound_name: "Ping" },
   working: { enabled: false, sound: false, sound_name: "Pop" },
   ready: { enabled: false, sound: false, sound_name: "Glass" },
+  // Mirrors Rust `ignore::IgnoreRules::defaults()`. Only used before the initial
+  // `get_config` resolves; after that the backend's persisted rules replace it.
+  ignore_rules: [
+    { kind: "cwd_contains", value: "ecc-homunculus" },
+    { kind: "folder_hex", min_len: 12 },
+    { kind: "first_prompt_prefix", value: "IMPORTANT: You are running in non-interactive" },
+  ],
 };
