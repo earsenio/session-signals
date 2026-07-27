@@ -52,15 +52,24 @@ POST http://127.0.0.1:4317/hook
 body: { hook_event_name, session_id, cwd, ... }   // async, non-blocking
 ```
 
-Events wired: `SessionStart`, `UserPromptSubmit`, `PostToolUse` (heartbeat),
-`Notification`, `Stop`, `SubagentStop`, `SessionEnd`.
+Events wired: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`
+(heartbeat), `Notification`, `Stop`, `SubagentStop`, `SessionEnd`. (The full
+installed set lives in `hooks.rs:EVENTS` — this is the subset that drives state.)
 
 **Listener derivation logic** (keyed by `session_id`):
 
 ```
 SessionStart            → upsert session, state = READY,  lastSeen = now
 UserPromptSubmit        → state = WORKING,                lastSeen = now
-PostToolUse             → lastSeen = now (heartbeat; keep current state)
+PreToolUse:
+  AskUserQuestion     |
+  ExitPlanMode          → state = NEEDS_YOU,              lastSeen = now
+                          (a block escalates regardless of agent_id)
+  any other tool        → state = WORKING,                lastSeen = now
+PostToolUse:
+  AskUserQuestion     |
+  ExitPlanMode          → state = WORKING (main agent only — you answered)
+  any other tool        → lastSeen = now (heartbeat; keep current state)
 Notification:
   permission_prompt   |
   elicitation_dialog    → state = NEEDS_YOU,              lastSeen = now
@@ -78,9 +87,12 @@ parent's `session_id`, so its events would otherwise mutate the parent row. Ever
 hook carries `agent_id` **only when emitted by a subagent** (null/absent for the
 main agent). Rule: **only the main agent moves a session into WORKING/READY;
 subagent events are heartbeat-only** (keep it live + drive `subagentCount`, never
-recolor the row). The sole exception is a *block*: a subagent hitting a permission
-gate still needs the user, so `Notification(permission_prompt|elicitation_dialog)`
-escalates to NEEDS_YOU regardless of `agent_id`. This is why a session can be
+recolor the row). The exception is a *block*: a subagent hitting a permission gate
+still needs the user, so `Notification(permission_prompt|elicitation_dialog)` —
+and likewise `PreToolUse(AskUserQuestion|ExitPlanMode)`, which halts on you the
+instant it fires — escalates to NEEDS_YOU regardless of `agent_id`. Clearing that
+red is main-agent-only, though: a subagent's `PostToolUse` for a blocking tool
+must not resume a genuinely-blocked parent. This is why a session can be
 RED/NEEDS_YOU with subagents running and not get cleared by their activity. The
 row's color tracks the main agent; the "N agents running" sub-line tracks
 subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
