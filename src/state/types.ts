@@ -5,6 +5,10 @@ export type SessionState = "needs_you" | "working" | "ready";
 
 export type Rollup = "red" | "orange" | "green" | "grey";
 
+/// Where a session runs. "remote" is a session bridged in from a Linux VM/WSL
+/// (detected host-side from a POSIX cwd on a Windows host); "host" is local.
+export type Origin = "host" | "remote";
+
 export interface SessionView {
   session_id: string;
   /// Combined one-line label ("folder (branch)" or "folder") — for plain-text
@@ -17,6 +21,9 @@ export interface SessionView {
   /// True when the session's cwd is a linked git worktree. The UI shows a subtle
   /// marker so it's distinguishable from a checkout of the same repo.
   worktree: boolean;
+  /// Where the session runs (host vs a bridged Linux VM/WSL). The widget tags
+  /// remote rows so same-named VM folders are distinguishable.
+  origin: Origin;
   state: SessionState;
   stale: boolean;
   seconds_in_state: number;
