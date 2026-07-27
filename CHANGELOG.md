@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kinds (`cwd_contains`, `folder_hex`, and an anchored `first_prompt_prefix`)
   with shipped defaults for the known pattern. Edit them to adapt to a new
   spawner without a rebuild; set `ignore_rules` to `[]` to disable.
+- Linux VM / WSL session support — surface Claude Code sessions running inside
+  local Linux VMs/WSL on the tray and widget, tagged with a `VM` badge. Works
+  over WSL mirrored networking (direct loopback) or a self-healing host bridge
+  (portproxy + guest forwarder) for NAT WSL / full VMs.
+- `tools/vm-bridge/` — guest hook installers, host bridge scripts, and a setup
+  guide for the above.
 
 ## [0.3.0] - 2026-06-29
 
