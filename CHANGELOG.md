@@ -8,17 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Session ignore rules — hide non-interactive / machine-spawned Claude Code
-  sessions (e.g. ECC headless `claude --print` "homunculus" agents, which appear
-  with a hex project-dir name and a standard non-interactive opening note) from
-  the widget list and the tray rollup. Hidden sessions stay tracked but never
-  colour the tray or fire notifications.
-- Ignore rules are data-driven via the new `config.ignore_rules` — three matcher
-  kinds (`cwd_contains`, `folder_hex`, and an anchored `first_prompt_prefix`)
-  with shipped defaults for the known pattern. Edit them to adapt to a new
-  spawner without a rebuild; set `ignore_rules` to `[]` to disable.
+- Session ignore rules — hide machine-spawned Claude Code sessions (headless
+  `claude --print` runs launched by background tooling) from the widget list and
+  the tray rollup. Hidden sessions stay tracked but never colour the tray or fire
+  notifications, and removing a rule brings them straight back.
+- Rules are data-driven via the new `config.ignore_rules`, with two matcher kinds:
+  `cwd_contains` and an anchored `first_prompt_prefix`. **Ships empty — nothing
+  is hidden until you opt in.** See [docs/IGNORE-RULES.md](docs/IGNORE-RULES.md)
+  for ready-made patterns and how to write your own.
 
 ### Fixed
+- Prompts sent as content blocks (rather than a plain string) are now read
+  correctly. The previous string-only assumption made the opening prompt of a
+  large share of sessions invisible, which silently disabled first-prompt ignore
+  rules for them.
+- A session's first prompt is re-checked after an empty read instead of latching
+  permanently. The first read happens at `SessionStart`, before any prompt
+  exists, so a one-shot check meant first-prompt rules could never fire.
+- `<ide_opened_file>` / `<ide_selection>` are recognised as interaction markers
+  alongside slash commands, so IDE-context sessions are never treated as
+  machine-spawned.
 - A session blocked on an `AskUserQuestion` prompt or plan approval
   (`ExitPlanMode`) now turns **Needs you** (red) and notifies, instead of
   sitting at **Working** (orange). These tools block on you the moment they fire

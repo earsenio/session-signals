@@ -80,19 +80,16 @@ pub struct Config {
     pub needs_you: StateNotify,
     pub working: StateNotify,
     pub ready: StateNotify,
-    /// Rules that hide non-interactive / machine-spawned sessions (e.g. ECC
-    /// headless `claude --print` agents) from the widget and tray rollup. A
-    /// config written before this field existed has no `ignore_rules` key, so
-    /// it defaults to the shipped set (`default_ignore_rules`) rather than an
-    /// empty list — filtering works out of the box. An explicit `[]` disables it.
-    #[serde(default = "default_ignore_rules")]
+    /// Rules that hide non-interactive / machine-spawned sessions (e.g. headless
+    /// `claude --print` agents launched by third-party tooling) from the widget
+    /// and tray rollup.
+    ///
+    /// **Empty by default** — Session Signals hides nothing until you ask it to.
+    /// See `docs/IGNORE-RULES.md` for ready-made patterns. Deserialized leniently
+    /// so a rule kind from a newer/older build is dropped rather than aborting the
+    /// whole config parse (which would reset every unrelated setting).
+    #[serde(default, deserialize_with = "crate::ignore::deserialize_lenient")]
     pub ignore_rules: Vec<crate::ignore::Matcher>,
-}
-
-/// Serde default + `Config::default` value for `ignore_rules`: the shipped
-/// ignore matchers (see `ignore::IgnoreRules::defaults`).
-fn default_ignore_rules() -> Vec<crate::ignore::Matcher> {
-    crate::ignore::IgnoreRules::defaults()
 }
 
 impl Default for Config {
@@ -110,7 +107,7 @@ impl Default for Config {
             needs_you: StateNotify::new(true, "Ping"),
             working: StateNotify::new(false, "Pop"),
             ready: StateNotify::new(false, "Glass"),
-            ignore_rules: default_ignore_rules(),
+            ignore_rules: crate::ignore::IgnoreRules::defaults(),
         }
     }
 }

@@ -13,9 +13,7 @@ export interface StateNotify {
 /// Hides non-interactive / machine-spawned sessions (e.g. ECC headless
 /// `claude --print` agents) from the widget and tray rollup.
 export type IgnoreMatcher =
-  | { kind: "cwd_contains"; value: string }
-  | { kind: "folder_hex"; min_len: number }
-  | { kind: "first_prompt_prefix"; value: string };
+  { kind: "cwd_contains"; value: string } | { kind: "first_prompt_prefix"; value: string };
 
 export interface Config {
   version: number;
@@ -57,11 +55,9 @@ export const DEFAULT_CONFIG: Config = {
   needs_you: { enabled: true, sound: false, sound_name: "Ping" },
   working: { enabled: false, sound: false, sound_name: "Pop" },
   ready: { enabled: false, sound: false, sound_name: "Glass" },
-  // Mirrors Rust `ignore::IgnoreRules::defaults()`. Only used before the initial
-  // `get_config` resolves; after that the backend's persisted rules replace it.
-  ignore_rules: [
-    { kind: "cwd_contains", value: "ecc-homunculus" },
-    { kind: "folder_hex", min_len: 12 },
-    { kind: "first_prompt_prefix", value: "IMPORTANT: You are running in non-interactive" },
-  ],
+  // Mirrors Rust `ignore::IgnoreRules::defaults()` — empty. Session Signals
+  // hides nothing until the user opts in. Keeping this empty also means a save
+  // landing before the initial `get_config` resolves can never resurrect rules
+  // a user deliberately cleared.
+  ignore_rules: [],
 };
