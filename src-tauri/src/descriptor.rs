@@ -156,15 +156,31 @@ fn extract_from_str(text: &str) -> Option<String> {
         .and_then(|s| clean(&s))
 }
 
-/// True for a slash-command / local-command wrapper string (not a typed task).
+/// Claude Code's own structural markers, which open a prompt when the *user*
+/// interacted rather than typed a task: a slash command, a local command, or an
+/// IDE context injection (opening a file / selecting text).
+///
+/// These are evidence of a **human** at the keyboard, so they are never a
+/// descriptor and never a session-ignore pattern. `<ide_opened_file>` and
+/// `<ide_selection>` were missing here originally, which made three otherwise
+/// human-only prompt shapes look like candidate machine patterns.
 fn is_wrapper(s: &str) -> bool {
     let t = s.trim_start();
-    t.starts_with("<command-") || t.starts_with("<local-command-")
+    t.starts_with("<command-")
+        || t.starts_with("<local-command-")
+        || t.starts_with("<ide_opened_file>")
+        || t.starts_with("<ide_selection>")
 }
 
 /// Extract a genuinely human-typed prompt string from a `type=="user"` entry, or
 /// `None` if it's a tool result, a sidechain/meta entry, or a slash-command/hook
 /// wrapper rather than something the user actually typed.
+///
+/// `message.content` is either a plain string **or an array of content blocks** —
+/// the array form is common (empirically the majority of sessions) and was
+/// previously dropped, so those prompts were invisible to both the descriptor
+/// fallback and the session-ignore rules. Text blocks are concatenated; arrays
+/// carrying only `tool_result` (or other non-text) blocks still yield `None`.
 fn human_prompt(v: &serde_json::Value) -> Option<String> {
     if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
         return None;
@@ -172,12 +188,27 @@ fn human_prompt(v: &serde_json::Value) -> Option<String> {
     if v.get("isMeta").and_then(|b| b.as_bool()) == Some(true) {
         return None;
     }
-    // Real typed prompts have a *string* content; tool results are arrays.
-    let content = v.get("message")?.get("content")?.as_str()?;
-    if is_wrapper(content) {
+    let content = v.get("message")?.get("content")?;
+    let text = match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => {
+            let joined = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if joined.trim().is_empty() {
+                return None;
+            }
+            joined
+        }
+        _ => return None,
+    };
+    if is_wrapper(&text) {
         return None;
     }
-    Some(content.to_string())
+    Some(text)
 }
 
 /// Collapse internal whitespace/newlines to single spaces, trim, and truncate to
@@ -339,6 +370,53 @@ mod tests {
             first_prompt_from_str(t).as_deref(),
             Some("the real first prompt")
         );
+    }
+
+    /// Prompts arrive as an **array of content blocks** at least as often as a
+    /// plain string. The string-only assumption made those sessions invisible to
+    /// the descriptor fallback and to the session-ignore rules.
+    #[test]
+    fn array_content_prompts_are_read() {
+        let t = r#"
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"please audit the listener"}]}}
+"#;
+        assert_eq!(
+            first_prompt_from_str(t).as_deref(),
+            Some("please audit the listener")
+        );
+        // Multiple text blocks are joined in order.
+        let t2 = r#"
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}
+"#;
+        assert_eq!(first_prompt_from_str(t2).as_deref(), Some("first\nsecond"));
+        // A tool-result-only array is still not a prompt.
+        let t3 = r#"
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"the real prompt"}]}}
+"#;
+        assert_eq!(
+            first_prompt_from_str(t3).as_deref(),
+            Some("the real prompt")
+        );
+    }
+
+    /// IDE context injections are Claude Code's own markers for a *human*
+    /// interaction (opening a file, selecting text) — never a typed task, and
+    /// never a machine-spawn pattern.
+    #[test]
+    fn ide_markers_are_wrappers() {
+        assert!(is_wrapper("<ide_opened_file>The user opened the file x.rs"));
+        assert!(is_wrapper("<ide_selection>The user selected lines 1 to 2"));
+        assert!(is_wrapper("<command-name>/compact</command-name>"));
+        assert!(is_wrapper("<local-command-caveat>Caveat: …"));
+        assert!(!is_wrapper("please fix the listener"));
+
+        // ...so a session opening with one yields no first prompt (fail-open:
+        // it stays visible rather than becoming an ignore candidate).
+        let t = r#"
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<ide_opened_file>The user opened the file c:\\x\\y.rs"}]}}
+"#;
+        assert_eq!(first_prompt_from_str(t), None);
     }
 
     #[test]
