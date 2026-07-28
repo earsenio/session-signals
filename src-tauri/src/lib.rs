@@ -222,6 +222,12 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
 const DESCRIPTOR_RETRY_SECS: u64 = 5;
 const DESCRIPTOR_REFRESH_SECS: u64 = 15;
 
+/// How long before re-attempting a session's first-prompt head-read while it is
+/// still unresolved. `SessionStart` carries a `transcript_path` but fires before
+/// any prompt is written, so the first attempt reliably finds nothing; without a
+/// retry the session could never be classified.
+const FIRST_PROMPT_RETRY_SECS: u64 = 5;
+
 /// Derive/refresh a session's descriptor from its transcript. Debounced via the
 /// engine (`descriptor_due`); the bounded file read runs with the engine lock
 /// released so transcript I/O never blocks other sessions' event processing.
@@ -275,7 +281,7 @@ fn maybe_refresh_hidden(app: &AppHandle, ev: &HookEvent) -> bool {
     let state = app.state::<AppState>();
     {
         let eng = state.engine.lock_safe();
-        if !eng.first_prompt_due(&ev.session_id) {
+        if !eng.first_prompt_due(&ev.session_id, Duration::from_secs(FIRST_PROMPT_RETRY_SECS)) {
             return false;
         }
     }

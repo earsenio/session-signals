@@ -75,14 +75,18 @@ struct Session {
     /// transcript read so we don't re-scan the file on every hook event.
     descriptor_checked_at: Option<Instant>,
     /// The session's first prompt (transcript head), cached for the first-prompt
-    /// ignore rule (`ignore::Matcher::FirstPromptPrefix`). `None` until read;
-    /// `first_prompt_checked` guards against re-reading. Hidden-ness is computed
-    /// on the fly from this + the cwd + the current rules, so a rule change takes
-    /// effect immediately with no per-session recomputation.
+    /// ignore rule (`ignore::Matcher::FirstPromptPrefix`). `None` until read.
+    /// Hidden-ness is computed on the fly from this + the cwd + the current
+    /// rules, so a rule change takes effect immediately with no per-session
+    /// recomputation.
     first_prompt: Option<String>,
-    /// Whether we've already attempted the first-prompt head-read for this
-    /// session (so it happens at most once per session, unless rules change).
-    first_prompt_checked: bool,
+    /// When we last *attempted* the first-prompt head-read. A timestamp, not a
+    /// bool: the first event carrying a `transcript_path` is `SessionStart`,
+    /// which fires *before* any prompt exists, so the first read always comes
+    /// back empty. A one-shot flag would latch there and the rule could never
+    /// fire again for the session's whole life. Mirrors `descriptor_checked_at`
+    /// — retry on a cadence while unresolved, stop once we have a value.
+    first_prompt_checked_at: Option<Instant>,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -423,7 +427,7 @@ impl Engine {
                         descriptor: None,
                         descriptor_checked_at: None,
                         first_prompt: None,
-                        first_prompt_checked: false,
+                        first_prompt_checked_at: None,
                     });
                 if ev.terminal_pid.is_some() {
                     s.terminal_pid = ev.terminal_pid;
@@ -561,7 +565,7 @@ impl Engine {
                     descriptor: None,
                     descriptor_checked_at: None,
                     first_prompt: None,
-                    first_prompt_checked: false,
+                    first_prompt_checked_at: None,
                 });
                 (Some(None), cwd, pid)
             }
@@ -687,30 +691,45 @@ impl Engine {
         if recheck_prompts {
             for s in self.sessions.values_mut() {
                 if s.first_prompt.is_none() {
-                    s.first_prompt_checked = false;
+                    s.first_prompt_checked_at = None;
                 }
             }
         }
     }
 
     /// Whether a first-prompt head-read is warranted for `id` right now: the
-    /// session exists, has a first-prompt rule to satisfy, hasn't been checked
-    /// yet, and isn't already hidden by a (cheaper) cwd rule. The caller does the
-    /// bounded transcript read off-lock only when this says so.
-    pub fn first_prompt_due(&self, id: &str) -> bool {
+    /// session exists, has a first-prompt rule to satisfy, isn't already hidden
+    /// by a (cheaper) cwd rule, and either has never been checked or is due a
+    /// retry. The caller does the bounded transcript read off-lock only when this
+    /// says so.
+    ///
+    /// `retry` matters: `SessionStart` is the first event carrying a
+    /// `transcript_path` and fires before any prompt is written, so the first
+    /// read reliably comes back empty. Once a prompt is resolved we stop asking.
+    pub fn first_prompt_due(&self, id: &str, retry: Duration) -> bool {
         if !self.ignore.has_prompt_rules() {
             return false;
         }
         match self.sessions.get(id) {
             None => false,
-            Some(s) => !s.first_prompt_checked && !self.ignore.cwd_hidden(&s.cwd),
+            Some(s) => {
+                if s.first_prompt.is_some() || self.ignore.cwd_hidden(&s.cwd) {
+                    return false;
+                }
+                match s.first_prompt_checked_at {
+                    None => true,
+                    Some(t) => t.elapsed() >= retry,
+                }
+            }
         }
     }
 
-    /// Record a session's first prompt (from the transcript head), stamping it
-    /// checked so we don't re-read. Returns whether the session's *hidden-ness*
-    /// changed (worth a UI refresh — a newly-hidden session must drop out of the
-    /// widget and rollup). A no-op if the session is gone.
+    /// Record the result of a first-prompt head-read. Always stamps the attempt
+    /// time (so a fruitless read still debounces) but only latches a *value* when
+    /// one was found — a `None` read must stay retryable, or a session checked at
+    /// `SessionStart` could never be classified. Returns whether the session's
+    /// *hidden-ness* changed (worth a UI refresh — a newly-hidden session must
+    /// drop out of the widget and rollup). A no-op if the session is gone.
     pub fn set_first_prompt(&mut self, id: &str, value: Option<String>) -> bool {
         // Split-borrow the two fields we need so `session_hidden` can read the
         // rules while we mutate the session.
@@ -724,7 +743,7 @@ impl Engine {
                 if value.is_some() {
                     s.first_prompt = value;
                 }
-                s.first_prompt_checked = true;
+                s.first_prompt_checked_at = Some(Instant::now());
                 session_hidden(ignore, s) != was
             }
         }
@@ -1066,9 +1085,18 @@ mod tests {
         }
     }
 
-    /// The shipped ignore rules, as the app wires them from config.
+    /// A user-configured rule set (the documented ECC recipe). Built explicitly
+    /// because `IgnoreRules::defaults()` is intentionally **empty** — the app
+    /// ships hiding nothing.
     fn ignore_rules() -> IgnoreRules {
-        IgnoreRules::new(IgnoreRules::defaults())
+        IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string(),
+            },
+            crate::ignore::Matcher::FirstPromptPrefix {
+                value: "IMPORTANT: You are running in non-interactive".to_string(),
+            },
+        ])
     }
 
     /// A subagent-emitted event: same `session_id` as the parent, but carrying an
@@ -1758,13 +1786,18 @@ mod tests {
         assert_eq!(e.hidden_count(), 1);
     }
 
+    /// A SHA-named directory must stay visible. `git worktree add ../<sha>` is a
+    /// real workflow (this app ships worktree-aware labels), and the removed
+    /// `folder_hex` matcher would have silently hidden it — while adding zero
+    /// coverage over `cwd_contains`.
     #[test]
-    fn hex_folder_session_is_hidden() {
+    fn sha_named_worktree_is_not_hidden() {
         let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
         e.set_ignore_rules(ignore_rules());
-        e.apply(&ev_cwd("UserPromptSubmit", "hex", r"D:\tmp\b4807c9eabf7"));
-        assert!(e.snapshot().is_empty(), "hex-named project dir is hidden");
-        assert_eq!(e.rollup(), Rollup::Grey);
+        e.apply(&ev_cwd("UserPromptSubmit", "wt", r"D:\tmp\b4807c9eabf7"));
+        assert_eq!(e.snapshot().len(), 1, "SHA-named worktree stays visible");
+        assert_eq!(e.rollup(), Rollup::Orange);
+        assert!(!e.is_hidden("wt"));
     }
 
     #[test]
@@ -1776,14 +1809,17 @@ mod tests {
         assert_eq!(e.snapshot().len(), 1, "visible until first prompt is read");
         // A first-prompt read is due (prompt rule exists, not yet checked, not
         // cwd-hidden); once the headless note is recorded, it's hidden.
-        assert!(e.first_prompt_due("p"));
+        assert!(e.first_prompt_due("p", Duration::from_secs(0)));
         let changed = e.set_first_prompt(
             "p",
             Some("IMPORTANT: You are running in non-interactive --print mode…".to_string()),
         );
         assert!(changed, "newly hidden → worth a refresh");
         assert!(e.snapshot().is_empty());
-        assert!(!e.first_prompt_due("p"), "already checked → not due again");
+        assert!(
+            !e.first_prompt_due("p", Duration::from_secs(0)),
+            "prompt resolved → never due again"
+        );
     }
 
     #[test]
@@ -1815,7 +1851,43 @@ mod tests {
             "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
         ));
         assert!(e.is_hidden("bot"));
-        assert!(!e.first_prompt_due("bot"), "cwd already hid it → no read");
+        assert!(
+            !e.first_prompt_due("bot", Duration::from_secs(0)),
+            "cwd already hid it → no read"
+        );
+    }
+
+    /// Regression for the latch bug: the FIRST head-read happens at
+    /// `SessionStart`, before any prompt exists, so it returns `None`. A one-shot
+    /// "checked" flag latched there and the rule could never fire again for that
+    /// session. A fruitless read must stay retryable.
+    #[test]
+    fn none_first_prompt_read_is_retried() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd("SessionStart", "p", "/home/me/work/project"));
+
+        // SessionStart: due, but the transcript has no prompt yet.
+        assert!(e.first_prompt_due("p", Duration::from_secs(0)));
+        assert!(
+            !e.set_first_prompt("p", None),
+            "no value → no visible change"
+        );
+
+        // The bug: this used to be false forever. It must be due again.
+        assert!(
+            e.first_prompt_due("p", Duration::from_secs(0)),
+            "a None read must stay retryable"
+        );
+
+        // The retry finds the real prompt and the session is classified.
+        assert!(e.set_first_prompt(
+            "p",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string())
+        ));
+        assert!(e.is_hidden("p"));
+        // ...and now that it's resolved, we stop re-reading.
+        assert!(!e.first_prompt_due("p", Duration::from_secs(0)));
     }
 
     #[test]
