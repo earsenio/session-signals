@@ -44,7 +44,10 @@ pub const MIN_PROPOSE_THRESHOLD: u32 = 3;
 /// real gap: a naturally-short prompt (< 60 chars) is sampled at its own
 /// length with no floor at all (see `observe::sample`'s doc), and was
 /// therefore the only path by which an unfloored short sample could reach a
-/// proposal. See `docs/measurements.md` for the full sweep table.
+/// proposal. See the "Minimum sample length" section of
+/// `docs/IGNORING_BOT_SPAWNED_SESSIONS.md` for the sweep table and, importantly,
+/// what it does not establish: `mixed` cannot see two *unmarked* openings
+/// colliding, which is the case this floor actually guards.
 pub const MIN_PROPOSE_SAMPLE_LEN: usize = 60;
 
 /// Built-in notification sounds (macOS system sound names under

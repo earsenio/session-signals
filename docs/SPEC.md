@@ -148,8 +148,9 @@ left alone changes nothing.
 proposal-eligible (`config::MIN_PROPOSE_SAMPLE_LEN`). This is measured, not
 guessed: a sweep over a 568-prompt local corpus found human/machine openings
 colliding at short prefix lengths (peaking at ~a fifth of clusters at 8 chars),
-dropping to zero from 57 characters onward and staying there through 120. See
-[measurements.md](measurements.md).
+dropping to zero from 57 characters onward. Method,
+table, and caveats:
+[IGNORING_BOT_SPAWNED_SESSIONS.md](IGNORING_BOT_SPAWNED_SESSIONS.md#minimum-sample-length--and-what-its-based-on).
 
 **Surfaces.** Settings → **Session filtering** hosts both rule editors, the
 read-only built-in markers, the proposal card, and an audit list of every
@@ -229,7 +230,8 @@ Still open:
 - A cross-user corpus for the §5.7 prefix measurement. The 57-character knee
   comes from a single developer's local tree; it cannot measure the
   same-polarity case (a user's own unmarked opening colliding with an unmarked
-  machine one). See [measurements.md](measurements.md).
+  machine one). See
+  [IGNORING_BOT_SPAWNED_SESSIONS.md](IGNORING_BOT_SPAWNED_SESSIONS.md#minimum-sample-length--and-what-its-based-on).
 - A confirmed fast path for the first prompt. No wired hook payload carries it
   within the currently-verified schema, so the transcript-head read stays
   load-bearing; `UserPromptSubmit`'s documented `prompt` field is an unverified

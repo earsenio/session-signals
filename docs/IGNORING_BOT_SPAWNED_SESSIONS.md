@@ -168,14 +168,60 @@ Three actions, none of them automatic:
 Nothing is applied without one of these three actions — a proposal sitting
 unaddressed changes nothing.
 
-**Minimum sample length.** A cluster's sample must be at least 60 characters
-to be proposal-eligible — measured, not guessed: a Phase 6 sweep over a real
-local corpus found human/machine openings colliding at short hypothetical
-prefix lengths (up to a fifth of clusters at 8 characters), with the collision
-rate dropping to zero and staying there from 57 characters onward. 60 matches
-the shortest length Session Signals already tracks for longer prompts, so this
-closes the one real gap — a naturally-short prompt has no length floor
-otherwise. See [docs/measurements.md](measurements.md) for the full sweep.
+### Minimum sample length — and what it's based on
+
+A cluster's sample must be at least **60 characters** to be proposal-eligible
+(`config::MIN_PROPOSE_SAMPLE_LEN`). That number is measured, not guessed.
+
+**How it was measured.** A sweep (`src-tauri/tests/prefix_sweep.rs`, `#[ignore]`d
+by default) walked a local `~/.claude/projects`-shaped tree, resolving each
+session's opening through the same `descriptor::first_prompt` the app uses. For
+every hypothetical prefix length from 4 to 120 it grouped openings by
+fingerprint and counted the **mixed** clusters — groups containing both a
+human-marked and an unmarked opening, i.e. the case where a prefix has stopped
+telling your sessions apart from a machine's.
+
+Run 2026-07-30: **756** transcripts walked, **568** resolved an opening (21
+human-marked, 547 unmarked); 9 of the 568 (~1.6%) are naturally under 60
+characters.
+
+| prefix length | clusters | mixed |
+|----:|---------:|------:|
+| 4–6 | 7 | 1 |
+| 8 | 13 | **5 (peak)** |
+| 9–17 | 10–12 | 4 |
+| 18–25 | 9–10 | 2–3 |
+| 26–56 | 9–10 | 1 |
+| **57–120** | 8 | **0** |
+
+Mixed clusters occur at every length from 4 through 56, peaking at 8 characters
+(where a fifth of all clusters mixed polarities), then drop to zero at 57 and
+stay there for the entire remaining range — 64 consecutive lengths. 60 is the
+shortest length Session Signals already tracks for longer prompts, so adopting
+it as the floor sits safely past that knee without introducing a second,
+unrelated constant. It closes the one real gap: a naturally-short prompt is
+otherwise sampled at its own length with no floor at all.
+
+**What this does not establish.** The `mixed` metric counts clusters mixing a
+*marked* human opening with an unmarked one — but marked openings are never
+observed in the first place, so they can never form a real cluster at any
+length; the sweep sees them only because it runs outside that guard. The risk
+this floor actually exists to reduce — **your own unmarked opening repeating
+and colliding with a machine's** — is by construction invisible to `mixed`, because
+two unmarked openings colliding is a homogeneous cluster, not a mixed one. The
+knee is real evidence that mixed-polarity collisions stop at 57 characters; it
+is not evidence about same-polarity collisions. It is also a single-developer
+local corpus, not a cross-user sample.
+
+One consequence that is **not** measured: a spawner whose injected opening is
+itself under 60 characters can never be proposed, at any cluster size. Both
+known ECC families are long, so there's no observed recall cost — but that's an
+assumption this corpus doesn't test, not a verified property.
+
+The raw record (full per-length table, method, and both Phase 6 measurements)
+is kept with the project's internal notes rather than published here; the sweep
+itself is reproducible with
+`BEACON_CORPUS=<path> cargo test --test prefix_sweep -- --ignored --nocapture`.
 
 Two honest caveats:
 

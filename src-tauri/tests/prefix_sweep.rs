@@ -5,7 +5,8 @@
 //! **Reads a real, LOCAL, uncommitted corpus.** Never runs in CI, asserts
 //! nothing about a specific number, and never touches a fixture — only that
 //! the sweep executed and produced a table. The table is the deliverable;
-//! paste it into `docs/measurements.md`.
+//! paste it into `docs/internal/measurements.md` (the archived raw record); the
+//! published summary lives in `docs/IGNORING_BOT_SPAWNED_SESSIONS.md`.
 //!
 //! ```text
 //! BEACON_CORPUS=/path/to/.claude/projects cargo test --test prefix_sweep -- --ignored --nocapture

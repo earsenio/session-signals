@@ -43,7 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eligible, backed by a real measurement rather than a guess — a sweep over a
   local corpus found human/machine openings colliding at short prefix
   lengths, dropping to zero collisions from 57 characters onward. See
-  [docs/measurements.md](docs/measurements.md).
+  the ["Minimum sample length"](docs/IGNORING_BOT_SPAWNED_SESSIONS.md#minimum-sample-length--and-what-its-based-on)
+  section of the filtering guide, which also records what the sweep does *not*
+  establish.
 - A committed fixture corpus (`src-tauri/tests/fixtures/`) and an end-to-end
   replay test (`corpus_replay.rs`) driving the real ingest pipeline —
   marker guard, `never_hide`, observation, clustering, and the engine's

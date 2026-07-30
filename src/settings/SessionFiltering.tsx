@@ -126,7 +126,7 @@ export default function SessionFiltering({ cfg, patch, flash }: SessionFiltering
           <p className="sRuleWarn">
             A short entry above matches broadly — below {minSampleLen} characters, a prefix stopped
             reliably separating sessions on the measured corpus (see{" "}
-            <code>docs/measurements.md</code>).
+            <code>docs/IGNORING_BOT_SPAWNED_SESSIONS.md</code>).
           </p>
         )}
 
