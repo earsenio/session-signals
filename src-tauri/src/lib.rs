@@ -14,7 +14,9 @@ mod glyph;
 pub mod hooks;
 pub mod ignore;
 mod listener;
+pub mod markers;
 mod notify;
+pub mod observe;
 pub mod token;
 mod tray;
 mod windows;
@@ -23,10 +25,11 @@ use config::Config;
 use engine::{CapturedTerminal, Engine, HookEvent, Rollup, SessionView, Transition};
 use ignore::IgnoreRules;
 use notify::Notifier;
+use observe::Observations;
 use serde::Serialize;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_store::StoreExt;
 use tiny_http::Server;
@@ -58,6 +61,10 @@ impl<T> LockExt<T> for Mutex<T> {
 /// the capture hook only fires on `SessionStart`.
 const STORE_FILE: &str = "beacon.json";
 const KEY_CAPTURES: &str = "captures";
+/// Key under which observed prompt-opening fingerprints are persisted
+/// (`{fingerprint_hex: {len, n, first, last}}` — see `observe.rs`; never
+/// prompt text).
+const KEY_OBSERVATIONS: &str = "observations";
 
 /// Persist a freshly-captured terminal handle, keyed by session id. Best-effort:
 /// a store error just means this session won't survive a restart for focus.
@@ -124,6 +131,39 @@ fn seed_captures(app: &AppHandle) {
     }
 }
 
+/// Load persisted observation records (fingerprint counts only), or an empty
+/// store if absent/unreadable — never a panic.
+fn load_observations(app: &AppHandle) -> Observations {
+    let Ok(store) = app.store(STORE_FILE) else {
+        return Observations::default();
+    };
+    match store.get(KEY_OBSERVATIONS) {
+        Some(v) => Observations::from_json(v),
+        None => Observations::default(),
+    }
+}
+
+/// Flush observation records to the store. Best-effort: a save failure means
+/// this run's counts are lost, not that the app stops (tolerated per plan —
+/// counts only delay a future proposal, never block anything).
+fn save_observations(app: &AppHandle, observations: &Observations) {
+    let Ok(store) = app.store(STORE_FILE) else {
+        return;
+    };
+    store.set(KEY_OBSERVATIONS, observations.to_json());
+    let _ = store.save();
+}
+
+/// Current Unix time in seconds (wall clock — for `Observations::prune`,
+/// which must survive a restart). `0` on an unreadable clock, which just
+/// means nothing prunes this tick rather than panicking.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Shared application state, managed by Tauri.
 struct AppState {
     engine: Mutex<Engine>,
@@ -143,6 +183,15 @@ struct AppState {
     /// Keeping the listener thread off the engine/notify work means one
     /// session's processing can never stall another's ingestion.
     events: Sender<HookEvent>,
+    /// Per-install secret salting observation fingerprints (see
+    /// `observe::salt`). Empty until `setup()` loads/mints it — mirrors
+    /// `token`, but under a separate store key so `regenerate_token` can
+    /// never orphan observation history.
+    observe_salt: Mutex<String>,
+    /// Observed prompt-opening counts (salted-hash fingerprint → record;
+    /// never plaintext). Flushed to the store on the sweep tick, not on every
+    /// observation — see the sweep thread.
+    observations: Mutex<Observations>,
 }
 
 /// What the webview receives on every update.
@@ -264,13 +313,20 @@ fn maybe_refresh_descriptor(app: &AppHandle, ev: &HookEvent) -> bool {
     eng.set_descriptor(&ev.session_id, value)
 }
 
-/// First-prompt ignore rule (B): when a `first_prompt_prefix` matcher exists and
-/// the session isn't already hidden by a (cheaper) cwd rule, read the transcript
-/// **head** once — off the engine lock — and record the session's first prompt so
-/// the engine can hide it if it opens with a known headless note. Returns whether
-/// the session's hidden-ness changed (worth a UI refresh). A cheap no-op in the
-/// common case: no B-rule configured, already hidden by cwd, already checked, or
-/// a synthetic event with no transcript.
+/// First-prompt ignore rule (B) + observation ingest: when a `first_prompt_prefix`
+/// matcher exists or observation is on, and the session isn't already hidden by
+/// a (cheaper) cwd rule, read the transcript **head** once — off the engine
+/// lock. The pipeline, in order (see the plan's Task 1 contract):
+///   1. read → `FirstPrompt { text, human_marked }`
+///   2. `observe_opening` — its own two guards (marker, then `never_hide`)
+///      decide whether this opening is ever fingerprinted
+///   3. `engine.set_first_prompt(text)` — **always last, unconditional**: it
+///      feeds the user's own `ignore_rules`, independent of observation, so
+///      skipping it for an allowlisted/marked session would be wrong.
+///
+/// Returns whether the session's hidden-ness changed (worth a UI refresh). A
+/// cheap no-op in the common case: nothing to do, already checked, or a
+/// synthetic event with no transcript.
 fn maybe_refresh_hidden(app: &AppHandle, ev: &HookEvent) -> bool {
     let Some(path) = ev.transcript_path.as_deref() else {
         return false;
@@ -286,9 +342,48 @@ fn maybe_refresh_hidden(app: &AppHandle, ev: &HookEvent) -> bool {
         }
     }
     // Bounded head read — lock intentionally NOT held here.
-    let value = descriptor::first_prompt(path);
+    let fp = descriptor::first_prompt(path);
+    if let Some(fp) = &fp {
+        observe_opening(app, &ev.session_id, &ev.cwd, fp);
+    }
     let mut eng = state.engine.lock_safe();
-    eng.set_first_prompt(&ev.session_id, value)
+    eng.set_first_prompt(&ev.session_id, fp.map(|fp| fp.text))
+}
+
+/// The two guards from the ingest pipeline, run before anything is
+/// fingerprinted: a human marker (built-in or config-added) means the
+/// session's true opening was a person at the keyboard, and an opening the
+/// user has allowlisted via `never_hide` must never touch disk at all — both
+/// are checked before `Observations::observe` is called. Runs off the engine
+/// lock (it's called from within the already-off-lock section of
+/// `maybe_refresh_hidden`); takes the observations lock only for the
+/// duration of `observe()`, and never while holding the engine lock, so the
+/// two mutexes can't be acquired in opposing orders.
+fn observe_opening(app: &AppHandle, session_id: &str, cwd: &str, fp: &descriptor::FirstPrompt) {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock_safe().clone();
+    if !cfg.observe_enabled {
+        return;
+    }
+    // A human marker preceded this prompt (slash command, IDE injection), or
+    // the prompt itself opens with one a config-added marker declares Human
+    // (a shape the transcript reader knows nothing about): the session's true
+    // opening was a person at the keyboard. Never observed.
+    let registry = markers::Registry::new(cfg.markers.clone());
+    if fp.human_marked || registry.is_human(&fp.text) {
+        return;
+    }
+    // The user has declared this opening their own. Allowlisted openings
+    // never touch disk at all — strictly better than filtering at proposal
+    // time, and no hash/plaintext comparison is ever needed.
+    let never_hide = IgnoreRules::new(cfg.never_hide.clone());
+    if never_hide.matches(cwd, Some(&fp.text)) {
+        return;
+    }
+    let salt_hex = state.observe_salt.lock_safe().clone();
+    let salt = observe::salt::bytes(&salt_hex);
+    let mut observations = state.observations.lock_safe();
+    observations.observe(&salt, session_id, &fp.text);
 }
 
 /// Build and start a listener on `port`. The hook callback does the minimum —
@@ -426,6 +521,23 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
         drop(eng);
         // Re-judged sessions may drop out of (or back into) the widget/tray.
         refresh(&app);
+    }
+    // `never_hide` outranks `ignore_rules` — a newly-allowlisted opening
+    // reveals a session immediately, same refresh-worthy reasoning as above.
+    if new.never_hide != old.never_hide {
+        let state = app.state::<AppState>();
+        let mut eng = state.engine.lock_safe();
+        eng.set_never_hide(IgnoreRules::new(new.never_hide.clone()));
+        drop(eng);
+        refresh(&app);
+    }
+    // Observation on/off takes effect immediately. Turning it off does NOT
+    // clear existing records — that's an explicit act, not a side effect of
+    // this toggle.
+    if new.observe_enabled != old.observe_enabled {
+        let state = app.state::<AppState>();
+        let mut eng = state.engine.lock_safe();
+        eng.set_observe_enabled(new.observe_enabled);
     }
 
     // 5. Persist + update live config.
@@ -610,6 +722,11 @@ pub fn run() {
             tray_palette: Mutex::new(TrayPalette::default()),
             notifier: Notifier::new(),
             events: tx,
+            // Empty until setup() loads (or mints) the persisted salt —
+            // mirrors `token` above, under its own store key.
+            observe_salt: Mutex::new(String::new()),
+            // Empty until setup() loads persisted observation records.
+            observations: Mutex::new(Observations::default()),
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
@@ -663,6 +780,14 @@ pub fn run() {
             let auth_token = token::load_or_create(&handle);
             *handle.state::<AppState>().token.lock_safe() = auth_token;
 
+            // Load (or mint) the observation salt — a separate secret from
+            // `auth_token` under its own store key (see `observe::salt`), and
+            // load any observation records from a prior run.
+            let observe_salt = observe::salt::load_or_create(&handle);
+            *handle.state::<AppState>().observe_salt.lock_safe() = observe_salt;
+            let observations = load_observations(&handle);
+            *handle.state::<AppState>().observations.lock_safe() = observations;
+
             // Load persisted config and align runtime state with it.
             let cfg = config::load(&handle);
             // Load the persisted tray palette (classic until the webview pushes
@@ -674,6 +799,8 @@ pub fn run() {
                 eng.set_stale_timeout(Duration::from_secs(cfg.stale_timeout_min * 60));
                 eng.set_drop_timeout(Duration::from_secs(cfg.idle_drop_min * 60));
                 eng.set_ignore_rules(IgnoreRules::new(cfg.ignore_rules.clone()));
+                eng.set_never_hide(IgnoreRules::new(cfg.never_hide.clone()));
+                eng.set_observe_enabled(cfg.observe_enabled);
                 drop(eng);
                 *state.config.lock_safe() = cfg.clone();
                 *state.tray_palette.lock_safe() = palette;
@@ -776,6 +903,24 @@ pub fn run() {
                                 for (_id, label) in &outcome.went_stale {
                                     notify_idle(sweep_handle, label);
                                 }
+                            }
+                        }
+                        // Prune expired observation records and flush to disk
+                        // on this same heartbeat tick — piggybacking on the
+                        // sweep rather than writing on every observation. A
+                        // crash between ticks loses at most one interval's
+                        // worth of counts, which only delays a proposal.
+                        {
+                            let retain_days = {
+                                let state = sweep_handle.state::<AppState>();
+                                let cfg = state.config.lock_safe();
+                                cfg.observe_retain_days
+                            };
+                            let state = sweep_handle.state::<AppState>();
+                            let mut observations = state.observations.lock_safe();
+                            observations.prune(retain_days, now_secs());
+                            if observations.take_dirty() {
+                                save_observations(sweep_handle, &observations);
                             }
                         }
                     }));

@@ -15,6 +15,14 @@ export interface StateNotify {
 export type IgnoreMatcher =
   { kind: "cwd_contains"; value: string } | { kind: "first_prompt_prefix"; value: string };
 
+/// A user-configured addition to the built-in marker registry. Mirrors the
+/// Rust `markers::MarkerRule` (src-tauri/src/markers.rs). Additive only — an
+/// entry colliding with a built-in prefix is dropped by the backend.
+export interface MarkerRule {
+  prefix: string;
+  polarity: "human" | "machine";
+}
+
 export interface Config {
   version: number;
   port: number;
@@ -38,6 +46,18 @@ export interface Config {
   /// through every `set_config` save, so a save never silently drops the user's
   /// rules. `[]` disables filtering. See `ignore::Matcher` in the Rust backend.
   ignore_rules: IgnoreMatcher[];
+  /// Openings the user has declared their own — outranks `ignore_rules` and
+  /// is never observed. Same passthrough-only shape as `ignore_rules`; `[]`
+  /// means nothing is allowlisted.
+  never_hide: IgnoreMatcher[];
+  /// User-configured additions to the built-in marker registry. Additive
+  /// only. `[]` by default.
+  markers: MarkerRule[];
+  /// Whether Session Signals reads session openings to look for repeating
+  /// patterns (salted-hash counts only, never plaintext). On by default.
+  observe_enabled: boolean;
+  /// Days an observation record is kept before being pruned.
+  observe_retain_days: number;
 }
 
 /// Built-in notification sounds offered in the UI (macOS system sound names).
@@ -60,4 +80,8 @@ export const DEFAULT_CONFIG: Config = {
   // landing before the initial `get_config` resolves can never resurrect rules
   // a user deliberately cleared.
   ignore_rules: [],
+  never_hide: [],
+  markers: [],
+  observe_enabled: true,
+  observe_retain_days: 30,
 };

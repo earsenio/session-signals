@@ -50,12 +50,24 @@ pub fn extract(transcript_path: &str) -> Option<String> {
     extract_from_str(&text)
 }
 
+/// A session's opening prompt plus whether Claude Code's own *human*
+/// interaction markers preceded it in the transcript.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FirstPrompt {
+    pub text: String,
+    /// True when a wrapper record (slash command, IDE injection) appeared
+    /// before `text`. The session's true opening was a human at the keyboard,
+    /// so `text` is that human's typed prompt — never a spawner's injection.
+    pub human_marked: bool,
+}
+
 /// Read a transcript's **head** and return the session's *first* prompt — the
 /// earliest queued/typed instruction — or `None` if unresolved. Used by the
 /// first-prompt ignore rule to recognize headless `--print` sessions by their
-/// injected opening note. Deliberately anchored to the first record so an
-/// ordinary session that merely quotes the phrase later is never matched.
-pub fn first_prompt(transcript_path: &str) -> Option<String> {
+/// injected opening note, and by observation to skip sessions a human clearly
+/// opened. Deliberately anchored to the first record so an ordinary session
+/// that merely quotes the phrase later is never matched.
+pub fn first_prompt(transcript_path: &str) -> Option<FirstPrompt> {
     let mut file = File::open(transcript_path).ok()?;
     let mut buf = vec![0u8; MAX_HEAD_BYTES];
     let n = file.read(&mut buf).ok()?;
@@ -66,8 +78,12 @@ pub fn first_prompt(transcript_path: &str) -> Option<String> {
 
 /// Pure core of [`first_prompt`]: return the content of the earliest record that
 /// is a queued instruction (`queue-operation`/`enqueue`) or a genuine human
-/// `user` prompt, skipping slash-command/hook wrappers. File-free for testing.
-fn first_prompt_from_str(text: &str) -> Option<String> {
+/// `user` prompt, skipping slash-command/hook wrappers — but remembering
+/// whether one was skipped along the way, since that skip is itself evidence
+/// the session's true opening was a human at the keyboard. File-free for
+/// testing.
+fn first_prompt_from_str(text: &str) -> Option<FirstPrompt> {
+    let mut saw_marker = false;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -82,18 +98,28 @@ fn first_prompt_from_str(text: &str) -> Option<String> {
             Some("queue-operation") => {
                 if v.get("operation").and_then(|o| o.as_str()) == Some("enqueue") {
                     if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
-                        if !is_wrapper(c) {
-                            return Some(c.to_string());
+                        if is_wrapper(c) {
+                            saw_marker = true;
+                        } else {
+                            return Some(FirstPrompt {
+                                text: c.to_string(),
+                                human_marked: saw_marker,
+                            });
                         }
                     }
                 }
             }
             // Or the first genuinely human-typed prompt.
-            Some("user") => {
-                if let Some(p) = human_prompt(&v) {
-                    return Some(p);
+            Some("user") => match classify_user_prompt(&v) {
+                UserPromptKind::Text(t) => {
+                    return Some(FirstPrompt {
+                        text: t,
+                        human_marked: saw_marker,
+                    });
                 }
-            }
+                UserPromptKind::Wrapper => saw_marker = true,
+                UserPromptKind::Skip => {}
+            },
             _ => {}
         }
     }
@@ -161,34 +187,47 @@ fn extract_from_str(text: &str) -> Option<String> {
 /// IDE context injection (opening a file / selecting text).
 ///
 /// These are evidence of a **human** at the keyboard, so they are never a
-/// descriptor and never a session-ignore pattern. `<ide_opened_file>` and
-/// `<ide_selection>` were missing here originally, which made three otherwise
-/// human-only prompt shapes look like candidate machine patterns.
+/// descriptor and never a session-ignore pattern. Sourced from
+/// `markers::BUILTIN_HUMAN` so the four markers exist in exactly one place.
+/// Deliberately a pure function over the built-in list only — no config
+/// access — so this parser never depends on user state.
 fn is_wrapper(s: &str) -> bool {
     let t = s.trim_start();
-    t.starts_with("<command-")
-        || t.starts_with("<local-command-")
-        || t.starts_with("<ide_opened_file>")
-        || t.starts_with("<ide_selection>")
+    crate::markers::BUILTIN_HUMAN
+        .iter()
+        .any(|p| t.starts_with(p))
 }
 
-/// Extract a genuinely human-typed prompt string from a `type=="user"` entry, or
-/// `None` if it's a tool result, a sidechain/meta entry, or a slash-command/hook
-/// wrapper rather than something the user actually typed.
-///
-/// `message.content` is either a plain string **or an array of content blocks** —
-/// the array form is common (empirically the majority of sessions) and was
-/// previously dropped, so those prompts were invisible to both the descriptor
-/// fallback and the session-ignore rules. Text blocks are concatenated; arrays
-/// carrying only `tool_result` (or other non-text) blocks still yield `None`.
-fn human_prompt(v: &serde_json::Value) -> Option<String> {
+/// The three outcomes of classifying a `type=="user"` transcript entry.
+/// Separated from a plain `Option<String>` because [`first_prompt_from_str`]
+/// needs to distinguish "wrapper, evidence of a human" from "not a prompt at
+/// all" — a distinction `human_prompt` (used only for display) doesn't need.
+enum UserPromptKind {
+    /// A genuine human-typed prompt.
+    Text(String),
+    /// A slash-command/hook/IDE-injection wrapper — not a typed task, but
+    /// still evidence a human was driving.
+    Wrapper,
+    /// Tool result, sidechain/meta entry, or non-text content: not a prompt.
+    Skip,
+}
+
+/// Classify a `type=="user"` entry. `message.content` is either a plain string
+/// **or an array of content blocks** — the array form is common (empirically
+/// the majority of sessions) and was previously dropped, so those prompts were
+/// invisible to both the descriptor fallback and the session-ignore rules.
+/// Text blocks are concatenated; arrays carrying only `tool_result` (or other
+/// non-text) blocks still yield `Skip`.
+fn classify_user_prompt(v: &serde_json::Value) -> UserPromptKind {
     if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true) {
-        return None;
+        return UserPromptKind::Skip;
     }
     if v.get("isMeta").and_then(|b| b.as_bool()) == Some(true) {
-        return None;
+        return UserPromptKind::Skip;
     }
-    let content = v.get("message")?.get("content")?;
+    let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
+        return UserPromptKind::Skip;
+    };
     let text = match content {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(blocks) => {
@@ -199,16 +238,29 @@ fn human_prompt(v: &serde_json::Value) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("\n");
             if joined.trim().is_empty() {
-                return None;
+                return UserPromptKind::Skip;
             }
             joined
         }
-        _ => return None,
+        _ => return UserPromptKind::Skip,
     };
     if is_wrapper(&text) {
-        return None;
+        UserPromptKind::Wrapper
+    } else {
+        UserPromptKind::Text(text)
     }
-    Some(text)
+}
+
+/// Extract a genuinely human-typed prompt string from a `type=="user"` entry, or
+/// `None` if it's a tool result, a sidechain/meta entry, or a slash-command/hook
+/// wrapper rather than something the user actually typed. Used by the display
+/// descriptor ([`extract_from_str`]), which has no need for the wrapper/skip
+/// distinction — see [`classify_user_prompt`] for that.
+fn human_prompt(v: &serde_json::Value) -> Option<String> {
+    match classify_user_prompt(v) {
+        UserPromptKind::Text(t) => Some(t),
+        UserPromptKind::Wrapper | UserPromptKind::Skip => None,
+    }
 }
 
 /// Collapse internal whitespace/newlines to single spaces, trim, and truncate to
@@ -350,10 +402,12 @@ mod tests {
 {"type":"queue-operation","operation":"enqueue","content":"IMPORTANT: You are running in non-interactive --print mode. Do the thing."}
 {"type":"user","message":{"role":"user","content":"a later message"}}
 "#;
+        let fp = first_prompt_from_str(t).unwrap();
         assert_eq!(
-            first_prompt_from_str(t).as_deref(),
-            Some("IMPORTANT: You are running in non-interactive --print mode. Do the thing.")
+            fp.text,
+            "IMPORTANT: You are running in non-interactive --print mode. Do the thing."
         );
+        assert!(!fp.human_marked, "no wrapper preceded the enqueue note");
     }
 
     #[test]
@@ -366,10 +420,10 @@ mod tests {
 {"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>"}}
 {"type":"user","message":{"role":"user","content":"the real first prompt"}}
 "#;
-        assert_eq!(
-            first_prompt_from_str(t).as_deref(),
-            Some("the real first prompt")
-        );
+        let fp = first_prompt_from_str(t).unwrap();
+        assert_eq!(fp.text, "the real first prompt");
+        // The skipped slash-command wrapper is evidence a human was present.
+        assert!(fp.human_marked);
     }
 
     /// Prompts arrive as an **array of content blocks** at least as often as a
@@ -380,24 +434,60 @@ mod tests {
         let t = r#"
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"please audit the listener"}]}}
 "#;
-        assert_eq!(
-            first_prompt_from_str(t).as_deref(),
-            Some("please audit the listener")
-        );
+        let fp = first_prompt_from_str(t).unwrap();
+        assert_eq!(fp.text, "please audit the listener");
+        assert!(!fp.human_marked);
         // Multiple text blocks are joined in order.
         let t2 = r#"
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}
 "#;
-        assert_eq!(first_prompt_from_str(t2).as_deref(), Some("first\nsecond"));
-        // A tool-result-only array is still not a prompt.
+        assert_eq!(first_prompt_from_str(t2).unwrap().text, "first\nsecond");
+        // A tool-result-only array is still not a prompt, and (unlike a wrapper)
+        // is not evidence of a human either.
         let t3 = r#"
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"the real prompt"}]}}
 "#;
-        assert_eq!(
-            first_prompt_from_str(t3).as_deref(),
-            Some("the real prompt")
-        );
+        let fp3 = first_prompt_from_str(t3).unwrap();
+        assert_eq!(fp3.text, "the real prompt");
+        assert!(!fp3.human_marked, "a tool-result skip is not a marker");
+    }
+
+    /// The substantive finding this task fixes: the in-app reader *skips*
+    /// wrapper records and returns the next real prompt, so a marker check on
+    /// the returned text alone could never fire. `human_marked` carries that
+    /// fact forward instead.
+    #[test]
+    fn human_marker_before_prompt_is_flagged() {
+        let t = r#"
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<ide_selection>The user selected lines 1 to 2"}]}}
+{"type":"user","message":{"role":"user","content":"please review the listener"}}
+"#;
+        let fp = first_prompt_from_str(t).unwrap();
+        assert_eq!(fp.text, "please review the listener");
+        assert!(fp.human_marked);
+
+        // The same prompt with no preceding marker is not flagged.
+        let bare =
+            r#"{"type":"user","message":{"role":"user","content":"please review the listener"}}"#;
+        let fp = first_prompt_from_str(bare).unwrap();
+        assert_eq!(fp.text, "please review the listener");
+        assert!(!fp.human_marked);
+    }
+
+    /// `isMeta` and tool-result skips are not evidence of a human — only a
+    /// wrapper record is. Conflating them would flag ordinary machine-spawned
+    /// openings as human-marked and defeat the ignore rule they're meant for.
+    #[test]
+    fn meta_and_tool_results_do_not_flag_human() {
+        let t = r#"
+{"type":"user","isMeta":true,"message":{"role":"user","content":"meta noise"}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}
+{"type":"user","message":{"role":"user","content":"the real prompt"}}
+"#;
+        let fp = first_prompt_from_str(t).unwrap();
+        assert_eq!(fp.text, "the real prompt");
+        assert!(!fp.human_marked);
     }
 
     /// IDE context injections are Claude Code's own markers for a *human*

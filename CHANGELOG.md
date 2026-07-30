@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cwd_contains` and an anchored `first_prompt_prefix`. **Ships empty — nothing
   is hidden until you opt in.** See [docs/IGNORE-RULES.md](docs/IGNORE-RULES.md)
   for ready-made patterns and how to write your own.
+- Observation store: Session Signals now reads each session's opening prompt
+  once and records a **salted hash** of it (never plaintext) so a future
+  release can offer a filter rule built from a pattern it actually saw.
+  Counts only, pruned after `observe_retain_days` (30 by default); toggle
+  with `observe_enabled` (on by default). Sessions a human marker precedes —
+  a slash command, `<ide_opened_file>`, `<ide_selection>` — are never
+  observed.
+- `never_hide` allowlist and reveal-on-block safety valve. `never_hide`
+  entries always outrank `ignore_rules` for the same session, and are also
+  never observed. Separately, any `ignore_rules`-hidden session that hits a
+  real block on you (a permission prompt, plan approval) is un-hidden for
+  the rest of its life and notifies as normal — a filter should never be
+  able to swallow a request that needs you specifically. See
+  [docs/IGNORE-RULES.md](docs/IGNORE-RULES.md).
 
 ### Fixed
 - Prompts sent as content blocks (rather than a plain string) are now read

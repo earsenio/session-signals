@@ -89,22 +89,46 @@ impl IgnoreRules {
         Vec::new()
     }
 
-    /// Cwd-only verdict. Available on every hook event — no file read.
-    pub fn cwd_hidden(&self, cwd: &str) -> bool {
+    /// Cwd-only match. Available on every hook event — no file read. Named
+    /// for the deny path; see `cwd_hidden` (kept as an alias) and `matches`
+    /// (the allowlist-shaped call the `never_hide` guard uses).
+    pub fn matches_cwd(&self, cwd: &str) -> bool {
         self.matchers.iter().any(|m| match m {
             Matcher::CwdContains { value } => contains_ci(cwd, value),
             Matcher::FirstPromptPrefix { .. } => false,
         })
     }
 
-    /// First-prompt verdict (B). The caller supplies the session's first prompt
-    /// (read once from the transcript head).
-    pub fn prompt_hidden(&self, first_prompt: &str) -> bool {
+    /// Cwd-only verdict. Available on every hook event — no file read.
+    #[inline]
+    pub fn cwd_hidden(&self, cwd: &str) -> bool {
+        self.matches_cwd(cwd)
+    }
+
+    /// First-prompt match. The caller supplies the session's first prompt
+    /// (read once from the transcript head). Named for the deny path; see
+    /// `prompt_hidden` (kept as an alias).
+    pub fn matches_prompt(&self, first_prompt: &str) -> bool {
         let p = first_prompt.trim_start();
         self.matchers.iter().any(|m| match m {
             Matcher::FirstPromptPrefix { value } => starts_with_ci(p, value.trim_start()),
             _ => false,
         })
+    }
+
+    /// First-prompt verdict (B). The caller supplies the session's first prompt
+    /// (read once from the transcript head).
+    #[inline]
+    pub fn prompt_hidden(&self, first_prompt: &str) -> bool {
+        self.matches_prompt(first_prompt)
+    }
+
+    /// Whether this rule set matches a session, by cwd alone, prompt alone,
+    /// or both. Used by the `never_hide` allowlist, which needs an
+    /// affirmative "does this apply" call rather than the deny-path's
+    /// `cwd_hidden`/`prompt_hidden` naming.
+    pub fn matches(&self, cwd: &str, first_prompt: Option<&str>) -> bool {
+        self.matches_cwd(cwd) || first_prompt.is_some_and(|p| self.matches_prompt(p))
     }
 
     /// Whether any first-prompt rule exists. Lets the caller skip the transcript
@@ -225,6 +249,24 @@ mod tests {
             !IgnoreRules::new(vec![Matcher::CwdContains { value: "x".into() }]).has_prompt_rules()
         );
         assert!(!IgnoreRules::default().has_prompt_rules());
+    }
+
+    #[test]
+    fn matches_fires_on_cwd_alone_prompt_alone_or_neither() {
+        let r = rules();
+        assert!(
+            r.matches(r"C:\Users\me\.local\share\ecc-homunculus\projects\x", None),
+            "cwd alone"
+        );
+        assert!(
+            r.matches(
+                "/home/me/ordinary",
+                Some("IMPORTANT: You are running in non-interactive --print mode")
+            ),
+            "prompt alone"
+        );
+        assert!(!r.matches("/home/me/ordinary", Some("please fix the listener")));
+        assert!(!r.matches("/home/me/ordinary", None));
     }
 
     #[test]

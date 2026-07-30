@@ -52,6 +52,60 @@ Hides a session whose working directory contains this substring
 own when both run in the same folder — which is common, since background tooling
 often analyses the repo you're working in. Prefer `first_prompt_prefix`.
 
+## Keeping your own openings out (`never_hide`)
+
+Session Signals also **observes** which session openings repeat, so it can
+eventually offer you a ready-made `first_prompt_prefix`/`cwd_contains` rule
+built from a pattern it actually saw — instead of you having to write one by
+hand from the recipe below. `never_hide` is how you keep specific openings of
+your own out of that observation entirely, and — **`never_hide` always
+wins** — out of `ignore_rules` too, even if a rule would otherwise hide them.
+
+```jsonc
+"never_hide": [
+  { "kind": "first_prompt_prefix", "value": "please review the listener" },
+  { "kind": "cwd_contains", "value": "my-personal-scratch-repo" }
+]
+```
+
+Same two matcher shapes as `ignore_rules`, same precedence logic — but
+inverted: a `never_hide` match makes a session visible (or keeps it visible)
+regardless of what `ignore_rules` says about the same cwd or prompt. If a
+prefix appears in both lists, the session stays **visible**. This fails open
+on purpose: extra noise in the widget is recoverable, a session you needed
+that silently vanished isn't.
+
+### What Session Signals records
+
+With observation on (`observe_enabled`, on by default), Session Signals reads
+each session's first prompt once and stores a **salted hash** of its opening —
+never the prompt text itself. Concretely, per distinct opening: a few
+128-bit fingerprints (one per tracked prefix length), a count, and first/last-seen
+timestamps. Records older than `observe_retain_days` (30 by default) are
+pruned automatically. `grep`-ing `beacon.json` for anything you typed will
+never find it.
+
+Honest limitation: hashing a short, low-entropy prompt is not anonymity
+against someone who can hash a dictionary of candidate strings. What it
+defeats is a readable prompt log sitting in JSON that could get synced,
+backed up, or attached to a bug report.
+
+An opening a human marker precedes — a slash command, `<ide_opened_file>`,
+`<ide_selection>` — is never observed either, on the same reasoning as the
+`ignore_rules` anchoring above: those are evidence of you at the keyboard, not
+a repeatable machine pattern.
+
+Set `observe_enabled: false` to turn observation off entirely; existing
+records are left alone until you clear them.
+
+### A hidden session that blocks on you always reappears
+
+If a session hidden by `ignore_rules` ever needs you — a permission prompt, a
+plan to approve — it is un-hidden for the rest of its life, notifies like any
+other session, and colours the tray red. This is a safety valve, not a bug:
+a filter is a guess about what's machine-spawned, and a guess should never be
+allowed to swallow a request for you specifically.
+
 ## Recipe: ECC (`continuous-learning` / homunculus observer)
 
 The [ECC plugin](https://github.com/affaan-m/ECC) spawns `claude -p` for two

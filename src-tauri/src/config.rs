@@ -23,6 +23,8 @@ pub const DEFAULT_STALE_MIN: u64 = 10;
 /// rather than blink out, short enough to eventually clear a dead session whose
 /// terminal never fired `SessionEnd`.
 pub const DEFAULT_IDLE_DROP_MIN: u64 = 60;
+/// Days an observation record survives before `prune` drops it.
+pub const DEFAULT_OBSERVE_RETAIN_DAYS: u64 = 30;
 
 /// Built-in notification sounds (macOS system sound names under
 /// `/System/Library/Sounds`). The settings UI offers this set.
@@ -90,6 +92,34 @@ pub struct Config {
     /// whole config parse (which would reset every unrelated setting).
     #[serde(default, deserialize_with = "crate::ignore::deserialize_lenient")]
     pub ignore_rules: Vec<crate::ignore::Matcher>,
+    /// Openings the user has declared their own — outranks `ignore_rules` and
+    /// is never observed (see `observe.rs`). **Empty by default**, same
+    /// rationale as `ignore_rules`: no shipped pattern names a specific tool.
+    /// Same lenient deserializer: an unrecognized matcher kind is dropped
+    /// rather than aborting the whole config parse.
+    #[serde(default, deserialize_with = "crate::ignore::deserialize_lenient")]
+    pub never_hide: Vec<crate::ignore::Matcher>,
+    /// User-configured additions to the built-in marker registry
+    /// (`markers::BUILTIN_HUMAN`). **Additive only** — an entry colliding
+    /// with a built-in prefix is dropped (see `markers::Registry::new`).
+    /// Ordinary `#[serde(default)]`, not the lenient deserializer: this is a
+    /// plain struct shape, not a tagged enum, so an unparseable entry is a
+    /// genuine config error.
+    #[serde(default)]
+    pub markers: Vec<crate::markers::MarkerRule>,
+    /// Whether Session Signals reads session openings to look for repeating
+    /// patterns (salted-hash counts only — see `observe.rs`). On by default:
+    /// the eventual filter-proposal surface presumes observation runs.
+    #[serde(default = "default_observe_enabled")]
+    pub observe_enabled: bool,
+    /// Days an observation record is kept before being pruned. `0` sanitizes
+    /// to [`DEFAULT_OBSERVE_RETAIN_DAYS`] — there's no "never" here.
+    #[serde(default)]
+    pub observe_retain_days: u64,
+}
+
+fn default_observe_enabled() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -108,6 +138,10 @@ impl Default for Config {
             working: StateNotify::new(false, "Pop"),
             ready: StateNotify::new(false, "Glass"),
             ignore_rules: crate::ignore::IgnoreRules::defaults(),
+            never_hide: Vec::new(),
+            markers: Vec::new(),
+            observe_enabled: true,
+            observe_retain_days: DEFAULT_OBSERVE_RETAIN_DAYS,
         }
     }
 }
@@ -130,6 +164,9 @@ impl Config {
         }
         if self.theme.trim().is_empty() {
             self.theme = "classic".to_string();
+        }
+        if self.observe_retain_days == 0 {
+            self.observe_retain_days = DEFAULT_OBSERVE_RETAIN_DAYS;
         }
         self.version = CURRENT_VERSION;
         self
@@ -154,4 +191,47 @@ pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     let v = serde_json::to_value(cfg).map_err(|e| e.to_string())?;
     store.set(CONFIG_KEY, v);
     store.save().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config written by a build that predates this plan (no `never_hide`,
+    /// `markers`, `observe_enabled`, `observe_retain_days` keys) must still
+    /// load, with the new fields filling in from their defaults rather than
+    /// aborting the whole parse.
+    #[test]
+    fn existing_config_json_loads_with_new_defaults() {
+        let json = serde_json::json!({
+            "version": 1,
+            "port": 4317,
+            "stale_timeout_min": 10,
+            "idle_drop_min": 60,
+            "launch_on_login": false,
+            "notify_idle": false,
+            "notify_unfocused_only": true,
+            "theme": "classic",
+            "needs_you": { "enabled": true, "sound": false, "sound_name": "Ping" },
+            "working": { "enabled": false, "sound": false, "sound_name": "Pop" },
+            "ready": { "enabled": false, "sound": false, "sound_name": "Glass" },
+            "ignore_rules": []
+        });
+        let cfg: Config = serde_json::from_value(json).expect("old config must still parse");
+        let cfg = cfg.sanitized();
+        assert!(cfg.never_hide.is_empty());
+        assert!(cfg.markers.is_empty());
+        assert!(cfg.observe_enabled);
+        assert_eq!(cfg.observe_retain_days, DEFAULT_OBSERVE_RETAIN_DAYS);
+    }
+
+    #[test]
+    fn zero_observe_retain_days_sanitizes_to_default() {
+        let mut cfg = Config {
+            observe_retain_days: 0,
+            ..Config::default()
+        };
+        cfg = cfg.sanitized();
+        assert_eq!(cfg.observe_retain_days, DEFAULT_OBSERVE_RETAIN_DAYS);
+    }
 }
