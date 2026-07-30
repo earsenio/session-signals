@@ -19,6 +19,41 @@ sessions you never started and the tray colours for work you aren't doing.
 In the Session Signals store (`beacon.json` in the app config dir), under
 `config.ignore_rules`.
 
+## Managing rules in Settings
+
+Everything on this page is also reachable from **Settings → Session
+filtering**, without hand-editing `beacon.json`:
+
+- **Hide these sessions** — an editable list of `ignore_rules`. Add a rule,
+  pick its kind (`first prompt starts` / `cwd contains`), type the value.
+  Changes save automatically (debounced while typing).
+- **Never hide these** — the `never_hide` list, editable the same way. The
+  section states the precedence in the UI, not just here: **`never_hide`
+  always wins** — a session matching both lists stays visible.
+- **Always treated as yours (built in)** — the four Claude Code interaction
+  markers (`<command-…>`, `<local-command-…>`, `<ide_opened_file>`,
+  `<ide_selection>`) that are never observed or proposed. Shown greyed, with
+  no delete affordance — they're immutable by design (see "What Session
+  Signals records" below).
+- **Hidden right now** — an audit list of every currently-hidden session
+  paired with the rule that's hiding it, plus the reveal-on-block count. This
+  is what makes the tray colour verifiable: it always matches exactly what
+  the widget is *not* showing.
+- **The suggested-filter card** — see "Suggested filters" below; it's the
+  same `list_proposals`/`accept_proposal`/`dismiss_proposal`/
+  `never_suggest_proposal` flow, rendered as one card at a time.
+- A quiet tray line ("Session filtering: N suggestion…") appears only when a
+  proposal is waiting and opens Settings scrolled to this section when
+  clicked — it never changes the tray icon or colour, which always encodes
+  rollup state only.
+
+One caveat the UI can't work around: accepting a `never_hide` entry (or
+writing one by hand) only keeps *new* observations out of the store —
+fingerprints already recorded before the entry existed remain (hashes are
+one-way, so there's no reversing one back to text to purge it after the
+fact). The **Clear observations** button in this section is the full reset if
+you want to be sure nothing from before is still counted.
+
 ## Rule kinds
 
 ### `first_prompt_prefix` — match the session's opening prompt
@@ -132,6 +167,15 @@ Three actions, none of them automatic:
 
 Nothing is applied without one of these three actions — a proposal sitting
 unaddressed changes nothing.
+
+**Minimum sample length.** A cluster's sample must be at least 60 characters
+to be proposal-eligible — measured, not guessed: a Phase 6 sweep over a real
+local corpus found human/machine openings colliding at short hypothetical
+prefix lengths (up to a fifth of clusters at 8 characters), with the collision
+rate dropping to zero and staying there from 57 characters onward. 60 matches
+the shortest length Session Signals already tracks for longer prompts, so this
+closes the one real gap — a naturally-short prompt has no length floor
+otherwise. See [docs/measurements.md](measurements.md) for the full sweep.
 
 Two honest caveats:
 

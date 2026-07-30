@@ -336,9 +336,34 @@ fn maybe_refresh_hidden(app: &AppHandle, ev: &HookEvent) -> bool {
         return false;
     }
     let state = app.state::<AppState>();
+    // `UserPromptSubmit` fires as the prompt is *submitted* — Claude Code's
+    // write of that turn to the transcript can still race the hook dispatch,
+    // so a forced read here can legitimately come back empty. `Stop` fires
+    // only after a full model turn has been produced, which is impossible
+    // unless the user's prompt was already durably read from the transcript
+    // — no race is possible by then, so forcing the read there too is
+    // strictly safe, and it's what actually closes the gap: a fast,
+    // tool-free round trip can lose the `UserPromptSubmit` race and, without
+    // this, never get a second attempt before `SessionEnd` drops the
+    // session (there's no `PreToolUse`/`PostToolUse` heartbeat to hang a
+    // later retry off of, and `Stop` used to arrive inside the still-
+    // elapsing retry window) — so its opening was never observed at all,
+    // not merely filtered out downstream. `SessionEnd` itself is NOT
+    // included: `Engine::apply` (called before this function, in
+    // `process_event`) already removes the session from its map on
+    // `SessionEnd`, so by the time `first_prompt_due` runs there, the
+    // session is already gone and forcing here would be a no-op.
+    // `Duration::ZERO` bypasses only the timer check inside
+    // `first_prompt_due`; its other guards (observation/rules relevance,
+    // already-resolved, cwd-hidden) still apply unchanged.
+    let retry = if matches!(ev.hook_event_name.as_str(), "UserPromptSubmit" | "Stop") {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(FIRST_PROMPT_RETRY_SECS)
+    };
     {
         let eng = state.engine.lock_safe();
-        if !eng.first_prompt_due(&ev.session_id, Duration::from_secs(FIRST_PROMPT_RETRY_SECS)) {
+        if !eng.first_prompt_due(&ev.session_id, retry) {
             return false;
         }
     }
