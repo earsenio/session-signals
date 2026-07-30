@@ -41,14 +41,15 @@ export interface Config {
   working: StateNotify;
   ready: StateNotify;
   /// Rules that hide non-interactive / machine-spawned sessions from the widget
-  /// and tray rollup. There's no editor UI yet, so this is a typed passthrough:
-  /// the settings window loads it via `get_config` and carries it verbatim
-  /// through every `set_config` save, so a save never silently drops the user's
-  /// rules. `[]` disables filtering. See `ignore::Matcher` in the Rust backend.
+  /// and tray rollup. Editable from the Settings → "Session filtering" section
+  /// (`RuleList`), which writes back through `set_config` like every other
+  /// field here. `[]` disables filtering. See `ignore::Matcher` in the Rust
+  /// backend.
   ignore_rules: IgnoreMatcher[];
   /// Openings the user has declared their own — outranks `ignore_rules` and
-  /// is never observed. Same passthrough-only shape as `ignore_rules`; `[]`
-  /// means nothing is allowlisted.
+  /// is never observed. Same editable shape as `ignore_rules`, shown as the
+  /// second `RuleList` in "Session filtering"; `[]` means nothing is
+  /// allowlisted.
   never_hide: IgnoreMatcher[];
   /// User-configured additions to the built-in marker registry. Additive
   /// only. `[]` by default.
