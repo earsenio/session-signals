@@ -56,6 +56,21 @@ Events wired: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`
 (heartbeat), `Notification`, `Stop`, `SubagentStop`, `SessionEnd`. (The full
 installed set lives in `hooks.rs:EVENTS` — this is the subset that drives state.)
 
+Alongside those http hooks, a **command** hook runs `beacon-capture.sh` and POSTs
+a synthetic `BeaconTerminal` event. It is wired to the events in
+`capture.rs:CAPTURE_EVENTS`:
+
+- `SessionStart` — full mode: the owning terminal's pid/tty (click-to-focus)
+  **and** the session's git identity (`git_base`, `git_branch`, `git_worktree`).
+- `Stop` — per-turn mode (script arg `turn`): git identity only, so a mid-session
+  `git checkout` reaches the widget within one turn. Skips the process-tree walk,
+  and its report may not create a session row (it can land after `SessionEnd`).
+  Not wired on Windows, where a PowerShell cold start is too slow for a per-turn
+  hook.
+
+The git fields are resolved *there*, in the user's shell, rather than by the app.
+That is a hard requirement, not an optimization — see **Guardrails**.
+
 **Listener derivation logic** (keyed by `session_id`):
 
 ```
@@ -128,8 +143,10 @@ subagents — fully independent. See `engine.rs` (`is_subagent`, `heartbeat`).
 
 ## Session presentation
 
-- **Label:** `basename(cwd)` + git branch if resolvable. Resolve branch by
-  reading `<cwd>/.git/HEAD` (no subprocess); fall back to none.
+- **Label:** repo root name + git branch, falling back to `basename(cwd)` (a
+  pure string op) when the session isn't in a repo or hasn't reported yet.
+  **The app never reads anything under a session's `cwd`** — see "No filesystem
+  access outside our own dirs" below.
 - **Row:** status dot • label • state text • time-in-state.
 - **Expiry:** removed on `SessionEnd`; otherwise marked stale after
   `staleTimeoutMin` (default 10) of silence, then dropped after a short grace.
@@ -194,6 +211,16 @@ session-signals/
   never overwrite the user's other hooks. Always offer a copy-paste fallback and
   a clean uninstall.
 - Local only. If you ever find yourself adding a network call out, stop.
+- **Never read a path under a session's `cwd`.** The app's own app-data/cache
+  dirs, `~/.claude/settings.json`, and `transcript_path` are the whole allowance.
+  macOS gates Files-and-Folders access *per protected category* (Desktop,
+  Documents, Downloads, network volumes — each a separate TCC grant), so any read
+  under an arbitrary session directory pops a permission prompt the first time a
+  session shows up under a category the user hasn't granted. Resolving the git
+  branch in-process used to do exactly this, on a 2 s poll. Anything needed about
+  a session's directory is derived by the capture hook and arrives in the payload
+  — see `capture.rs` and `Session::git_base`. `Engine::snapshot` does zero I/O;
+  keep it that way.
 
 ## Build phases
 

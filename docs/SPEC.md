@@ -61,7 +61,9 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
 - Compute the tray rollup on every change.
 - Sweep stale sessions (`now − lastSeen > staleTimeoutMin`), then drop after a
   short grace.
-- Resolve session label: `basename(cwd)` + branch from `<cwd>/.git/HEAD`.
+- Resolve session label: repo root name + branch, as reported by the capture
+  hook (which runs in the user's shell); `basename(cwd)` when unavailable. The
+  app itself must not read under a session's `cwd` — see §5.7.
 
 ### 5.2 Tray / menu-bar
 - Rollup glyph reflects the priority state.
@@ -92,6 +94,22 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
 - A theme = an icon set + a state→appearance map, defined as data.
 - Switching themes requires no code change. Ship at least two (classic traffic
   light + one alternate).
+
+### 5.7 No filesystem access outside our own directories
+The app reads and writes only its own app-data/cache dirs, `~/.claude/settings.json`
+(hook install), and each session's `transcript_path`. It must **never** open a path
+under a session's `cwd`.
+
+Why: macOS gates Files-and-Folders access per protected category —
+`kTCCServiceSystemPolicyDesktopFolder`, `…DocumentsFolder`, `…DownloadsFolder`,
+`…NetworkVolumes` are each a separate grant. Since sessions live in arbitrary
+folders, reading `<cwd>/.git/HEAD` to resolve a branch made macOS pop a permission
+prompt the first time a session appeared under any not-yet-granted category — and
+the read sat on a 2 s poll, so it recurred rather than asking once.
+
+Anything the app needs *about* a session's directory is therefore derived by the
+capture hook (`capture.rs`), which runs in the user's own shell under the
+terminal's grants, and shipped in the `BeaconTerminal` payload.
 
 ## 6. Non-functional requirements
 

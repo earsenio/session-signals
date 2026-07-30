@@ -130,9 +130,9 @@ fn is_our_hook(hook: &Value) -> bool {
     }
 }
 
-/// The capture command hook group for `SessionStart` (Feature 2). `matcher` is
-/// empty like our http groups; a slightly longer timeout covers the process-tree
-/// walk + the loopback POST.
+/// A capture command hook group (Feature 2). `matcher` is empty like our http
+/// groups; a slightly longer timeout covers the process-tree walk + the loopback
+/// POST.
 fn capture_group(command: &str) -> Value {
     json!({
         "matcher": "",
@@ -285,6 +285,61 @@ pub fn needs_token_repair(token: &str) -> bool {
     false
 }
 
+/// True when an installed Session Signals is missing the capture command hook on
+/// any event in `CAPTURE_EVENTS` — the shape left behind by upgrading from a
+/// build that only wired capture to `SessionStart`. Used at startup to
+/// auto-repair, exactly like [`needs_token_repair`].
+///
+/// This matters more than it looks: since the git identity behind every row
+/// label now arrives *only* via the capture hook, a session whose `Stop` hook is
+/// missing would silently show a folder name with no branch.
+///
+/// Returns false when Session Signals isn't installed at all (the first-run flow
+/// owns that case).
+pub fn needs_capture_repair() -> bool {
+    let path = match settings_path() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let settings = match load_settings(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let hooks = match settings.get("hooks").and_then(Value::as_object) {
+        Some(h) => h,
+        None => return false,
+    };
+    // Only judge an install that exists — no http hooks means "not installed".
+    let installed = hooks.values().any(|groups| {
+        groups.as_array().is_some_and(|gs| {
+            gs.iter().any(|g| {
+                g.get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hs| hs.iter().any(is_our_hook))
+            })
+        })
+    });
+    if !installed {
+        return false;
+    }
+    crate::capture::CAPTURE_EVENTS.iter().any(|ev| {
+        let has_capture = hooks
+            .get(*ev)
+            .and_then(Value::as_array)
+            .is_some_and(|groups| {
+                groups.iter().any(|g| {
+                    g.get("hooks").and_then(Value::as_array).is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("type").and_then(Value::as_str) == Some("command")
+                                && is_our_hook(h)
+                        })
+                    })
+                })
+            });
+        !has_capture
+    })
+}
+
 /// Merge Session Signals' hooks into settings.json. Idempotent: any prior Session Signals hooks
 /// are removed first, then our fresh block is added. Other hooks untouched.
 pub fn install(port: u16, token: &str, capture_cmd: Option<&str>) -> Result<PathBuf, String> {
@@ -309,11 +364,13 @@ pub fn install(port: u16, token: &str, capture_cmd: Option<&str>) -> Result<Path
         // add the current ones.
         strip_our_hooks(groups);
         groups.push(our_group(port, token));
-        // The terminal-capture command hook rides alongside the http hook on
-        // SessionStart only (that's when we resolve the owning terminal).
-        if ev == &"SessionStart" {
+        // The capture command hook rides alongside the http hook on the events
+        // in `CAPTURE_EVENTS` — SessionStart (terminal handle + git identity)
+        // and, off Windows, Stop (git identity only, so a mid-session checkout
+        // reaches the widget within a turn). See `capture.rs`.
+        if crate::capture::CAPTURE_EVENTS.contains(ev) {
             if let Some(cmd) = capture_cmd {
-                groups.push(capture_group(cmd));
+                groups.push(capture_group(&crate::capture::command_for_event(cmd, ev)));
             }
         }
     }
@@ -350,6 +407,77 @@ pub fn uninstall(_port: u16) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The capture hook is what supplies every row's repo/branch label now, so
+    /// its wiring is load-bearing: `SessionStart` runs it in full mode,
+    /// `Stop` (off Windows) in per-turn mode, and both must strip cleanly on
+    /// uninstall via the shared marker.
+    #[test]
+    fn capture_hook_is_wired_per_event_and_strips_cleanly() {
+        let mut settings: Map<String, Value> = serde_json::from_str(
+            r#"{ "hooks": { "Stop": [
+                 { "matcher": "", "hooks": [ { "type": "command", "command": "echo hi" } ] }
+               ] } }"#,
+        )
+        .unwrap();
+        let base_cmd = "sh '/x/beacon-capture.sh'";
+
+        let hooks = settings.get_mut("hooks").unwrap().as_object_mut().unwrap();
+        for ev in EVENTS {
+            let arr = hooks
+                .entry(ev.to_string())
+                .or_insert_with(|| Value::Array(vec![]));
+            let groups = arr.as_array_mut().unwrap();
+            strip_our_hooks(groups);
+            groups.push(our_group(4317, "tok"));
+            if crate::capture::CAPTURE_EVENTS.contains(ev) {
+                groups.push(capture_group(&crate::capture::command_for_event(
+                    base_cmd, ev,
+                )));
+            }
+        }
+
+        let capture_cmd_on = |settings: &Map<String, Value>, ev: &str| -> Option<String> {
+            settings["hooks"][ev]
+                .as_array()?
+                .iter()
+                .filter_map(|g| g["hooks"][0]["command"].as_str())
+                .find(|c| c.contains(crate::capture::MARKER))
+                .map(str::to_string)
+        };
+
+        assert_eq!(
+            capture_cmd_on(&settings, "SessionStart").as_deref(),
+            Some(base_cmd),
+            "SessionStart runs the script in full mode"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            capture_cmd_on(&settings, "Stop").as_deref(),
+            Some(format!("{base_cmd} turn").as_str()),
+            "Stop runs it in per-turn mode"
+        );
+        // An event we don't wire capture to keeps only the http hook.
+        assert_eq!(capture_cmd_on(&settings, "PreToolUse"), None);
+
+        // Uninstall: the marker match must reclaim the capture hooks on every
+        // event, while the user's own Stop command hook survives.
+        let hooks = settings.get_mut("hooks").unwrap().as_object_mut().unwrap();
+        let keys: Vec<String> = hooks.keys().cloned().collect();
+        for ev in keys {
+            if let Some(groups) = hooks.get_mut(&ev).and_then(Value::as_array_mut) {
+                strip_our_hooks(groups);
+                if groups.is_empty() {
+                    hooks.remove(&ev);
+                }
+            }
+        }
+        assert_eq!(capture_cmd_on(&settings, "Stop"), None);
+        let stop = settings["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0]["hooks"][0]["command"], "echo hi");
+        assert!(settings["hooks"].get("SessionStart").is_none());
+    }
 
     #[test]
     fn merge_preserves_foreign_hooks_and_uninstall_reverts() {
