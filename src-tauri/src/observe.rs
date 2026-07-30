@@ -137,8 +137,10 @@ pub fn fingerprint(salt: &[u8], sample: &str) -> String {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct Observation {
-    /// Which prefix length produced this fingerprint. A later de-duplication
-    /// pass needs it; it reveals nothing about the prompt itself.
+    /// The actual char count of the sample that produced this fingerprint —
+    /// may be shorter than the nominal `PREFIX_LENS` entry for a short
+    /// prompt. Retained for display on the proposal card; `proposals::build`'s
+    /// dedup uses `sample.chars().count()` directly, not this field.
     pub len: u16,
     pub n: u32,
     /// Unix seconds (wall clock — `Instant` can't survive a restart).
@@ -304,6 +306,12 @@ impl Observations {
     /// 60-char parent and the 120-char child of one opening are one family).
     /// Drops the matching `samples` and `dismissed` entries too. Returns how
     /// many records were removed.
+    ///
+    /// Relates fingerprints via `normalize` (lowercased, whitespace-collapsed
+    /// prefix containment) — broader than `proposals::build`'s dedup, which
+    /// relates them via `matches_prompt` (a raw literal, case-insensitive
+    /// prefix). The two diverge when interior whitespace differs; broader is
+    /// the safe direction for an explicit "never suggest".
     ///
     /// Can only relate fingerprints that currently have a live sample: a
     /// record carried over from a previous run has none and cannot be

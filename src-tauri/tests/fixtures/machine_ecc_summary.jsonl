@@ -1,0 +1,1 @@
+{"type":"queue-operation","operation":"enqueue","content":"SYSTEM NOTICE: this session was spawned by an automated pipeline to produce a summary artifact. Do not wait for user confirmation at any point; gather the diff, write the summary, and terminate automatically when finished."}

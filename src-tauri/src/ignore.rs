@@ -9,7 +9,8 @@
 //! **Ships empty.** Nothing is hidden until the user opts in: a session that
 //! silently disappears is this app's worst failure mode, and any pattern we could
 //! ship would name one specific third-party tool. Known spawner patterns are
-//! documented as a copy-paste recipe in `docs/IGNORE-RULES.md` instead.
+//! documented as a copy-paste recipe in `docs/IGNORING_BOT_SPAWNED_SESSIONS.md`
+//! instead.
 //!
 //! Two matcher kinds, both data-driven (persisted in config), so a new spawner —
 //! or a change to an existing one — is handled by editing config, no rebuild:
@@ -84,7 +85,7 @@ impl IgnoreRules {
     /// worst failure mode, and because any pattern we could ship would name a
     /// specific third-party tool — every user would then carry filters for
     /// software they've never installed. Known spawner patterns are documented
-    /// as a copy-paste recipe instead (see `docs/IGNORE-RULES.md`).
+    /// as a copy-paste recipe instead (see `docs/IGNORING_BOT_SPAWNED_SESSIONS.md`).
     pub fn defaults() -> Vec<Matcher> {
         Vec::new()
     }
@@ -147,6 +148,13 @@ impl IgnoreRules {
         matchers.push(extra);
         IgnoreRules { matchers }
     }
+
+    /// Declaration-order iterator over the matchers. Exposed instead of a
+    /// public field so `matchers` stays private and this type's encapsulation
+    /// (the reason `preview_hidden_by` could never drift) is preserved.
+    pub fn iter(&self) -> impl Iterator<Item = &Matcher> {
+        self.matchers.iter()
+    }
 }
 
 /// Case-insensitive substring test (ASCII-lowercased; paths/notes are ASCII).
@@ -172,7 +180,7 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The ECC recipe from `docs/IGNORE-RULES.md`. Deliberately built here rather
+    /// The ECC recipe from `docs/IGNORING_BOT_SPAWNED_SESSIONS.md`. Deliberately built here rather
     /// than shipped in `defaults()` — see `empty_defaults_hide_nothing`.
     fn rules() -> IgnoreRules {
         IgnoreRules::new(vec![

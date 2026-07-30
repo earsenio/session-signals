@@ -1,0 +1,1 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"please audit the observation store for any accidental plaintext leaks"}]}}

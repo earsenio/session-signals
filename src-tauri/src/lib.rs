@@ -193,6 +193,11 @@ struct AppState {
     /// never plaintext). Flushed to the store on the sweep tick, not on every
     /// observation — see the sweep thread.
     observations: Mutex<Observations>,
+    /// The suggestion count last pushed to the tray/webviews. `refresh_proposals`
+    /// compares against this before doing any work — without it, a hot path
+    /// (every `PostToolUse` heartbeat, across every session) would rebuild and
+    /// swap the tray menu even when the count hasn't moved (review finding H1).
+    suggestion_count: Mutex<usize>,
 }
 
 /// What the webview receives on every update.
@@ -217,6 +222,91 @@ fn refresh(app: &AppHandle) {
         tray::set_rollup(app, payload.rollup, &palette);
     }
     let _ = app.emit("sessions-updated", payload);
+}
+
+/// What the webview receives whenever the proposal count can have changed.
+#[derive(Serialize, Clone)]
+struct ProposalsPayload {
+    count: usize,
+}
+
+/// Recompute the eligible-proposal count and, if it moved, push it to the
+/// tray's quiet suggestion line and broadcast it to the webviews. Takes the
+/// config lock then the observations lock (never nests the engine lock under
+/// either) — so this must run on the `beacon-events` worker or the sweep
+/// thread, never the listener thread.
+///
+/// Called from a hot path (`process_event`, on essentially every real hook
+/// event across every tracked session), so the compare-and-set against
+/// `suggestion_count` is load-bearing, not an optimization: without it, every
+/// heartbeat would run `proposals::build` over the whole observation store
+/// and unconditionally rebuild-and-swap the tray's native menu — the one
+/// thing riskiest to do while the user might have that menu open (review
+/// finding H1). The sweep tick's periodic call is the safety net that catches
+/// any count change a hook event didn't (e.g. a dismissal lapsing with no
+/// new event to hang the refresh off of).
+fn refresh_proposals(app: &AppHandle) {
+    let count = {
+        let state = app.state::<AppState>();
+        let cfg = state.config.lock_safe().clone();
+        let ignore = IgnoreRules::new(cfg.ignore_rules.clone());
+        let never_hide = IgnoreRules::new(cfg.never_hide.clone());
+        let obs = state.observations.lock_safe();
+        proposals::build(&obs, cfg.propose_threshold, &ignore, &never_hide).len()
+    };
+    {
+        let state = app.state::<AppState>();
+        let mut last = state.suggestion_count.lock_safe();
+        if !suggestion_count_changed(&mut last, count) {
+            return;
+        }
+    }
+    tray::set_suggestion_count(app, count);
+    let _ = app.emit("proposals-updated", ProposalsPayload { count });
+}
+
+/// The compare-and-set at the heart of `refresh_proposals`'s guard, pulled
+/// out as a pure function so it's unit-testable without an `AppHandle` (this
+/// crate has no Tauri test harness — see `proposals.rs`'s own doc comment for
+/// the same constraint). Returns whether `count` differed from `*last`;
+/// updates `*last` to `count` only when it did.
+fn suggestion_count_changed(last: &mut usize, count: usize) -> bool {
+    if *last == count {
+        return false;
+    }
+    *last = count;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestion_count_unchanged_is_not_reported_as_changed() {
+        let mut last = 3;
+        assert!(
+            !suggestion_count_changed(&mut last, 3),
+            "same count → no change"
+        );
+        assert_eq!(last, 3, "unchanged value is left untouched");
+    }
+
+    #[test]
+    fn suggestion_count_change_is_reported_and_stored() {
+        let mut last = 0;
+        assert!(suggestion_count_changed(&mut last, 2), "0 -> 2 is a change");
+        assert_eq!(last, 2);
+        assert!(
+            !suggestion_count_changed(&mut last, 2),
+            "calling again with the same count is a no-op"
+        );
+        assert!(
+            suggestion_count_changed(&mut last, 0),
+            "2 -> 0 (e.g. all proposals accepted/dismissed) is also a change"
+        );
+        assert_eq!(last, 0);
+    }
 }
 
 /// React to a state transition: fire a notification per the user's config.
@@ -251,6 +341,12 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
     let hidden_changed = maybe_refresh_hidden(app, &ev);
     if outcome.changed || desc_changed || hidden_changed {
         refresh(app);
+    }
+    // A session's visibility or first-prompt classification changing is
+    // exactly when the eligible-proposal set (and thus the tray's
+    // suggestion count) can have moved too.
+    if hidden_changed || outcome.changed {
+        refresh_proposals(app);
     }
     if let Some(t) = outcome.transition {
         // Never notify for a filtered (headless/machine-spawned) session.
@@ -572,6 +668,10 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
     // widget restyles even though the change was made in the settings window.
     let _ = app.emit("config-updated", &new);
     *app.state::<AppState>().config.lock_safe() = new;
+    // A rule or threshold change can change which clusters are eligible
+    // proposals — recompute the tray line every save, not just on rule
+    // changes, since `propose_threshold`/`observe_enabled` also affect it.
+    refresh_proposals(&app);
     Ok(())
 }
 
@@ -628,16 +728,18 @@ fn accept_proposal(app: AppHandle, fingerprint: String) -> Result<(), String> {
 /// count, so it reappears once the cluster grows past that count. Not
 /// persisted — see `Observations::dismiss`.
 #[tauri::command]
-fn dismiss_proposal(app: AppHandle, fingerprint: String) {
+fn dismiss_proposal(app: AppHandle, fingerprint: String) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut obs = state.observations.lock_safe();
     let count = obs
         .iter_with_samples()
         .find(|(fp, _, _)| *fp == fingerprint)
         .map(|(_, rec, _)| rec.n);
-    if let Some(n) = count {
-        obs.dismiss(&fingerprint, n);
-    }
+    let Some(n) = count else {
+        return Err("proposal is no longer available".to_string());
+    };
+    obs.dismiss(&fingerprint, n);
+    Ok(())
 }
 
 /// Refuse a proposal permanently: add its sample to `never_hide` (via
@@ -675,6 +777,58 @@ fn clear_observations(app: AppHandle) {
     let mut obs = state.observations.lock_safe();
     obs.clear();
     save_observations(&app, &obs);
+}
+
+/// Everything the settings audit view needs in one call: how many sessions
+/// are hidden and by which rule, how many times the reveal-on-block valve
+/// has fired, and how many clusters are currently being observed (count
+/// only — never sample text, matching the store's hash-only invariant).
+#[derive(Serialize)]
+struct FilterStatus {
+    hidden_count: usize,
+    /// How many times the reveal-on-block valve fired this run. Non-zero
+    /// falsifies the "headless never blocks" premise — which is exactly why
+    /// it is surfaced rather than logged.
+    reveal_count: u64,
+    hidden: Vec<engine::HiddenSession>,
+    /// Live observation records. Count only — never sample text.
+    observed_clusters: usize,
+}
+
+#[tauri::command]
+fn filter_status(app: AppHandle) -> FilterStatus {
+    let state = app.state::<AppState>();
+    // Observations lock taken and dropped before the engine lock — mirrors
+    // `list_proposals`'s established ordering (never nest engine under obs).
+    let observed_clusters = {
+        let obs = state.observations.lock_safe();
+        obs.iter_with_samples().count()
+    };
+    let eng = state.engine.lock_safe();
+    FilterStatus {
+        hidden_count: eng.hidden_count(),
+        reveal_count: eng.reveal_count(),
+        hidden: eng.hidden_audit(),
+        observed_clusters,
+    }
+}
+
+/// The immutable built-in human markers, shipped from Rust so the UI cannot
+/// drift from `markers::BUILTIN_HUMAN`.
+#[tauri::command]
+fn markers_builtin() -> Vec<String> {
+    markers::BUILTIN_HUMAN
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// The measured proposal-eligibility floor, shipped from Rust so the settings
+/// UI's short-entry warning (review finding M4) can never drift from the
+/// constant `proposals::build` actually enforces.
+#[tauri::command]
+fn min_propose_sample_len() -> usize {
+    config::MIN_PROPOSE_SAMPLE_LEN
 }
 
 /// Receive the active theme's palette from the webview, persist it, and restyle
@@ -855,6 +1009,9 @@ pub fn run() {
             observe_salt: Mutex::new(String::new()),
             // Empty until setup() loads persisted observation records.
             observations: Mutex::new(Observations::default()),
+            // 0 until the first `refresh_proposals` call (right after
+            // `tray::build` in setup()) reconciles it with reality.
+            suggestion_count: Mutex::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
@@ -865,6 +1022,9 @@ pub fn run() {
             dismiss_proposal,
             never_suggest_proposal,
             clear_observations,
+            filter_status,
+            markers_builtin,
+            min_propose_sample_len,
             set_tray_palette,
             install_hooks,
             uninstall_hooks,
@@ -962,6 +1122,10 @@ pub fn run() {
 
             // Build the tray (starts grey) using the persisted palette.
             tray::build(&handle, &palette)?;
+            // Reflect any proposals eligible from observation history loaded
+            // above, so a restart doesn't silently drop the suggestion line
+            // until the next qualifying hook event.
+            refresh_proposals(&handle);
 
             // Create the floating widget (shown only if it was visible last run).
             windows::init(&handle)?;
@@ -1056,6 +1220,12 @@ pub fn run() {
                                 save_observations(sweep_handle, &observations);
                             }
                         }
+                        // Recompute the tray suggestion line every tick — a
+                        // dismissal lapsing, a cluster crossing the
+                        // threshold, or a pruned record can all move the
+                        // count without any hook event to hang the refresh
+                        // off of.
+                        refresh_proposals(sweep_handle);
                     }));
                     if unwind.is_err() {
                         eprintln!("beacon: panic during stale sweep; skipping this pass");

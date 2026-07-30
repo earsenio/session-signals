@@ -1000,6 +1000,69 @@ impl Engine {
         views.sort_by(|a, b| a.label.cmp(&b.label));
         views
     }
+
+    /// Every currently-hidden session, with the rule hiding it. The verdict
+    /// comes from `session_hidden` (never a re-implementation); attribution
+    /// then re-runs the individual matchers to find which one fired.
+    pub fn hidden_audit(&self) -> Vec<HiddenSession> {
+        let now = Instant::now();
+        let mut out: Vec<HiddenSession> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| session_hidden(&self.ignore, &self.never_hide, s))
+            .filter_map(|(id, s)| {
+                attribute_rule(&self.ignore, s).map(|rule| HiddenSession {
+                    session: Engine::view_of(id, s, now),
+                    rule,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.session.label.cmp(&b.session.label));
+        out
+    }
+}
+
+/// One hidden session plus the rule responsible. Serialized to the settings
+/// audit view — PRD decision 5's shipped substitute for a cross-user
+/// precision claim.
+#[derive(Serialize, Clone, Debug)]
+pub struct HiddenSession {
+    pub session: SessionView,
+    /// The first matching rule, in `session_hidden`'s own evaluation order
+    /// (cwd before first-prompt). A session hidden by both a cwd rule and a
+    /// prompt rule reports the cwd rule — this is "the first matching rule",
+    /// not a claim that no other rule also matches.
+    pub rule: crate::ignore::Matcher,
+}
+
+/// Find the first matcher in `ignore` (declaration order, cwd kind evaluated
+/// before prompt kind — mirroring `session_hidden`) that fires against `s`.
+/// `None` only if `s` isn't actually hidden by `ignore` (callers only invoke
+/// this after `session_hidden` already returned true, so this is defensive).
+fn attribute_rule(ignore: &IgnoreRules, s: &Session) -> Option<crate::ignore::Matcher> {
+    use crate::ignore::Matcher;
+    ignore
+        .iter()
+        .find(|m| match m {
+            Matcher::CwdContains { value } => IgnoreRules::new(vec![Matcher::CwdContains {
+                value: value.clone(),
+            }])
+            .cwd_hidden(&s.cwd),
+            Matcher::FirstPromptPrefix { .. } => false,
+        })
+        .or_else(|| {
+            let first_prompt = s.first_prompt.as_deref()?;
+            ignore.iter().find(|m| match m {
+                Matcher::FirstPromptPrefix { value } => {
+                    IgnoreRules::new(vec![Matcher::FirstPromptPrefix {
+                        value: value.clone(),
+                    }])
+                    .prompt_hidden(first_prompt)
+                }
+                Matcher::CwdContains { .. } => false,
+            })
+        })
+        .cloned()
 }
 
 /// Tools that block on the user the instant they start and emit no
@@ -2286,6 +2349,164 @@ mod tests {
             value: "proj-a".to_string(),
         });
         assert_eq!(e.hidden_count(), before);
+    }
+
+    /// `hidden_audit` lists every hidden session paired with the rule that
+    /// hid it — one hidden by a cwd rule, one hidden by a first-prompt rule,
+    /// one left visible.
+    #[test]
+    fn audit_lists_every_hidden_session_with_its_rule() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "cwd-hidden",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "prompt-hidden",
+            "/home/me/proj",
+        ));
+        e.set_first_prompt(
+            "prompt-hidden",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        e.apply(&ev_cwd("UserPromptSubmit", "visible", "/home/me/other"));
+
+        let audit = e.hidden_audit();
+        assert_eq!(audit.len(), 2, "only the two hidden sessions appear");
+        let cwd_entry = audit
+            .iter()
+            .find(|h| h.session.session_id == "cwd-hidden")
+            .expect("cwd-hidden session must appear in the audit");
+        assert_eq!(
+            cwd_entry.rule,
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string()
+            }
+        );
+        let prompt_entry = audit
+            .iter()
+            .find(|h| h.session.session_id == "prompt-hidden")
+            .expect("prompt-hidden session must appear in the audit");
+        assert_eq!(
+            prompt_entry.rule,
+            crate::ignore::Matcher::FirstPromptPrefix {
+                value: "IMPORTANT: You are running in non-interactive".to_string()
+            }
+        );
+        assert!(audit.iter().all(|h| h.session.session_id != "visible"));
+    }
+
+    /// A session matching both a cwd rule and a prompt rule reports the cwd
+    /// rule — `session_hidden`'s own evaluation order (A before B).
+    #[test]
+    fn audit_attributes_cwd_before_prompt_when_both_match() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "both",
+            "/x/.local/share/ecc-homunculus/projects/deadbeef",
+        ));
+        e.set_first_prompt(
+            "both",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        let audit = e.hidden_audit();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].rule,
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string()
+            },
+            "cwd rule reported even though the prompt rule also matches"
+        );
+    }
+
+    /// Mirrors `preview_excludes_never_hide_and_revealed`: an allowlisted
+    /// session and a sticky-revealed session must both be absent from the
+    /// audit, matching `snapshot()`'s own exclusions exactly.
+    #[test]
+    fn audit_excludes_never_hide_and_revealed() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_never_hide(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "allowlisted".to_string(),
+            },
+        ]));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "allowlisted",
+            "/x/.local/share/ecc-homunculus/projects/allowlisted",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "revealed",
+            "/x/.local/share/ecc-homunculus/projects/deadbeef",
+        ));
+        e.apply(&HookEvent {
+            hook_event_name: "Notification".to_string(),
+            session_id: "revealed".to_string(),
+            cwd: "/x/.local/share/ecc-homunculus/projects/deadbeef".to_string(),
+            notification_type: Some("permission_prompt".to_string()),
+            ..Default::default()
+        });
+        assert!(!e.is_hidden("revealed"), "premise: revealed sticks visible");
+
+        let audit = e.hidden_audit();
+        assert!(audit.iter().all(|h| h.session.session_id != "allowlisted"));
+        assert!(audit.iter().all(|h| h.session.session_id != "revealed"));
+    }
+
+    /// `hidden_audit().len()` must always agree with `hidden_count()` — the
+    /// audit is a superset-free enumeration of the same verdict.
+    #[test]
+    fn audit_len_equals_hidden_count() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot1",
+            "/x/.local/share/ecc-homunculus/projects/a",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot2",
+            "/x/.local/share/ecc-homunculus/projects/b",
+        ));
+        e.apply(&ev_cwd("UserPromptSubmit", "visible", "/home/me/proj"));
+        assert_eq!(e.hidden_audit().len(), e.hidden_count());
+    }
+
+    /// A default engine (no rules) has an empty audit.
+    #[test]
+    fn audit_is_empty_with_no_rules() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/a",
+        ));
+        assert!(e.hidden_audit().is_empty());
+    }
+
+    /// Declaration order survives the `IgnoreRules::iter()` accessor.
+    #[test]
+    fn ignore_rules_iter_yields_declaration_order() {
+        let rules = ignore_rules();
+        let kinds: Vec<&crate::ignore::Matcher> = rules.iter().collect();
+        assert_eq!(kinds.len(), 2);
+        assert!(matches!(
+            kinds[0],
+            crate::ignore::Matcher::CwdContains { .. }
+        ));
+        assert!(matches!(
+            kinds[1],
+            crate::ignore::Matcher::FirstPromptPrefix { .. }
+        ));
     }
 
     #[test]

@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<ide_selection>The user selected lines 42 to 58 in engine.rs"}]}}
+{"type":"user","message":{"role":"user","content":"can you explain what this selection is doing and whether it's safe to refactor"}}

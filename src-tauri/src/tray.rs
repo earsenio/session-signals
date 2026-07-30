@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconId};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 use tauri_plugin_store::StoreExt;
 
 const TRAY_ID: &str = "beacon-tray";
@@ -105,8 +105,13 @@ pub fn save_palette(app: &AppHandle, palette: &TrayPalette) {
     }
 }
 
-/// Build the tray icon and menu. Starts grey (no sessions yet), using `palette`.
-pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
+/// Build the tray menu. `suggestions` inserts a plain-text
+/// "Session filtering: N suggestion(s)…" line (plus its separator) only when
+/// there's a live proposal to surface — zero suggestions means the item and
+/// its separator are both absent, not a greyed/disabled item. This is the
+/// *only* discovery surface for the filtering feature: the icon and tooltip
+/// never change for it.
+fn build_menu(app: &AppHandle, suggestions: usize) -> tauri::Result<Menu<Wry>> {
     let widget = MenuItem::with_id(app, "widget", "Show / hide widget", true, None::<&str>)?;
     let install = MenuItem::with_id(
         app,
@@ -122,12 +127,34 @@ pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &widget, &sep1, &install, &uninstall, &sep2, &settings, &sep3, &quit,
-        ],
-    )?;
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<Wry>> = vec![&widget, &sep1];
+
+    let suggestion_label = if suggestions == 1 {
+        "Session filtering: 1 suggestion…".to_string()
+    } else {
+        format!("Session filtering: {suggestions} suggestions…")
+    };
+    let suggestions_item =
+        MenuItem::with_id(app, "suggestions", &suggestion_label, true, None::<&str>)?;
+    let sep_suggestions = PredefinedMenuItem::separator(app)?;
+    if suggestions > 0 {
+        items.push(&suggestions_item);
+        items.push(&sep_suggestions);
+    }
+
+    items.push(&install);
+    items.push(&uninstall);
+    items.push(&sep2);
+    items.push(&settings);
+    items.push(&sep3);
+    items.push(&quit);
+
+    Menu::with_items(app, &items)
+}
+
+/// Build the tray icon and menu. Starts grey (no sessions yet), using `palette`.
+pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
+    let menu = build_menu(app, 0)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon_for(palette, Rollup::Grey))
@@ -140,6 +167,19 @@ pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
+}
+
+/// Rebuild and swap the tray menu to reflect the current suggestion count.
+/// Rebuild-and-`set_menu` is the version-stable way to add/remove a tray
+/// item in Tauri 2 — `MenuItem` only exposes `set_text`/`set_enabled`, not
+/// insertion/removal, so there's no cheaper path than a full rebuild. Never
+/// touches the icon or tooltip: those encode rollup only.
+pub fn set_suggestion_count(app: &AppHandle, n: usize) {
+    if let Ok(menu) = build_menu(app, n) {
+        if let Some(tray) = app.tray_by_id(&TrayIconId::new(TRAY_ID)) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
 }
 
 /// Update the tray icon + tooltip to reflect the current rollup, using `palette`.
@@ -173,6 +213,19 @@ fn handle_menu(app: &AppHandle, id: &str) {
             show_settings(app);
         }
         "settings" => show_settings(app),
+        "suggestions" => {
+            show_settings(app);
+            // In `tauri dev`, `show_settings` re-navigates the webview, which
+            // tears down any listener registered before that navigation
+            // finishes — an immediate emit here would be lost. A short delay
+            // lets the fresh page's listener register first; harmless in a
+            // release build, where there's no re-navigation to race.
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = app.emit("beacon://open-filters", ());
+            });
+        }
         "quit" => app.exit(0),
         _ => {}
     }

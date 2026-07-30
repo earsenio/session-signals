@@ -32,6 +32,20 @@ pub const DEFAULT_PROPOSE_THRESHOLD: u32 = 3;
 /// re-enforced in `proposals::build` — measured leakage on the research
 /// corpus was 26 human patterns at 1, 3 at 2, and 0 at 3.
 pub const MIN_PROPOSE_THRESHOLD: u32 = 3;
+/// Minimum sample length (chars) a cluster's `sample` must reach before it's
+/// proposal-eligible — enforced in `proposals::build`. PRD decision 6,
+/// measured, not invented: the Phase 6 prefix-discrimination sweep over a
+/// real local `~/.claude/projects` corpus (756 transcripts, 568 resolved
+/// first prompts) found mixed human/machine clusters at short hypothetical
+/// prefix lengths (peak: 5 mixed clusters at 8 chars) but **zero** from 57
+/// chars onward, stably across the entire remaining swept range (57–120).
+/// This floor matches `observe::PREFIX_LENS`'s existing shortest tracked
+/// length (60) — already past the measured knee — so it also closes the one
+/// real gap: a naturally-short prompt (< 60 chars) is sampled at its own
+/// length with no floor at all (see `observe::sample`'s doc), and was
+/// therefore the only path by which an unfloored short sample could reach a
+/// proposal. See `docs/measurements.md` for the full sweep table.
+pub const MIN_PROPOSE_SAMPLE_LEN: usize = 60;
 
 /// Built-in notification sounds (macOS system sound names under
 /// `/System/Library/Sounds`). The settings UI offers this set.
@@ -94,7 +108,7 @@ pub struct Config {
     /// and tray rollup.
     ///
     /// **Empty by default** — Session Signals hides nothing until you ask it to.
-    /// See `docs/IGNORE-RULES.md` for ready-made patterns. Deserialized leniently
+    /// See `docs/IGNORING_BOT_SPAWNED_SESSIONS.md` for ready-made patterns. Deserialized leniently
     /// so a rule kind from a newer/older build is dropped rather than aborting the
     /// whole config parse (which would reset every unrelated setting).
     #[serde(default, deserialize_with = "crate::ignore::deserialize_lenient")]

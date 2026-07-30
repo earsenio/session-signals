@@ -6,7 +6,7 @@
 //! (see the Phase 2/3 review). The command layer (`lib.rs`) fills in
 //! `matching` from the live engine after calling [`build`].
 
-use crate::config::MIN_PROPOSE_THRESHOLD;
+use crate::config::{MIN_PROPOSE_SAMPLE_LEN, MIN_PROPOSE_THRESHOLD};
 use crate::engine::SessionView;
 use crate::ignore::{IgnoreRules, Matcher};
 use crate::observe::Observations;
@@ -43,18 +43,26 @@ pub struct Proposal {
 /// 1. Only fingerprints with a live sample (`Observations::iter_with_samples`).
 /// 2. Cluster size `>= threshold.max(MIN_PROPOSE_THRESHOLD)` — the floor holds
 ///    even if `threshold` arrives unsanitized.
-/// 3. Drop clusters already covered by an existing `ignore_rules` entry.
-/// 4. Drop clusters matching `never_hide` — **prompt-only**: a `never_hide`
+/// 3. Sample length `>= MIN_PROPOSE_SAMPLE_LEN` — PRD decision 6, measured
+///    (see the constant's doc): below the measured knee, short samples showed
+///    real human/machine collisions on the research corpus. Only ever
+///    excludes a naturally-short prompt (< 60 chars, sampled at its own
+///    length per `observe::sample`'s no-floor doc) — a prompt at or past
+///    `PREFIX_LENS`'s existing 60-char floor is never affected.
+/// 4. Drop clusters already covered by an existing `ignore_rules` entry.
+/// 5. Drop clusters matching `never_hide` — **prompt-only**: a `never_hide`
 ///    cwd rule can't be evaluated here, there's no cwd in the store, by
 ///    design. A real but fail-open gap (the proposal still surfaces; the user
 ///    still decides).
-/// 5. Drop clusters dismissed at or above their current count (a dismissal
-///    lapses once the cluster grows).
 /// 6. Shortest-prefix-wins: of the survivors, keep a candidate only if no
 ///    already-kept (shorter) sample is a literal prefix of it — evaluated via
 ///    a throwaway `IgnoreRules` so the dedup can never disagree with the rule
 ///    semantics it mirrors.
-/// 7. Sort by count desc, then last_seen desc, then fingerprint asc.
+/// 7. Drop proposals dismissed at or above their current count (a dismissal
+///    lapses once the cluster grows). Applied *after* dedup, against the
+///    proposal the user was actually shown — see `retain` below (review
+///    finding H1).
+/// 8. Sort by count desc, then last_seen desc, then fingerprint asc.
 pub fn build(
     obs: &Observations,
     threshold: u32,
@@ -66,9 +74,9 @@ pub fn build(
     let mut candidates: Vec<Proposal> = obs
         .iter_with_samples()
         .filter(|(_, rec, _)| rec.n >= floor)
+        .filter(|(_, _, sample)| sample.chars().count() >= MIN_PROPOSE_SAMPLE_LEN)
         .filter(|(_, _, sample)| !ignore.matches_prompt(sample))
         .filter(|(_, _, sample)| !never_hide.matches_prompt(sample))
-        .filter(|(fp, rec, _)| obs.dismissed_at(fp).is_none_or(|n| rec.n > n))
         .map(|(fp, rec, sample)| Proposal {
             fingerprint: fp.to_string(),
             sample: sample.to_string(),
@@ -102,6 +110,13 @@ pub fn build(
             kept.push(candidate);
         }
     }
+
+    // Dismissal acts on the proposal the user was actually shown. Running it
+    // before dedup would un-shadow the next-longest record of the same
+    // opening, which then surfaces as a "new" proposal carrying near-identical
+    // text — so "Not now" would return the same card immediately (review
+    // finding H1).
+    kept.retain(|p| obs.dismissed_at(&p.fingerprint).is_none_or(|n| p.count > n));
 
     kept.sort_by(|a, b| {
         b.count
@@ -223,16 +238,23 @@ mod tests {
     #[test]
     fn dismissed_returns_when_the_cluster_grows() {
         let mut obs = Observations::default();
-        // Kept under 60 chars so all five `PREFIX_LENS` collapse to a single
-        // record (Task 3's dedup) — a longer prompt would fingerprint at
-        // several lengths, and dismissing just one wouldn't clear the others.
-        let prompt = "a short dismissed opening for growth testing";
+        // Must clear MIN_PROPOSE_SAMPLE_LEN (60 chars) to be proposal-eligible
+        // at all (PRD decision 6) — which, incidentally, already makes this a
+        // multi-length case too: at ~70 chars this prompt fingerprints at both
+        // the 60-char truncation and its own (70-char) full length. This test
+        // checks the basic dismiss-then-regrow behaviour and reads the
+        // fingerprint off `build`'s own output (the proposal the user was
+        // actually shown) rather than an arbitrary stored record;
+        // `dismissal_survives_multi_length_fingerprints` below is the one
+        // that pins the >120-char, all-five-`PREFIX_LENS` span and asserts
+        // that premise explicitly — not fully redundant with this one, but
+        // overlapping.
+        let prompt = "a dismissed opening long enough to clear the proposal eligibility floor";
         observe_n_times(&mut obs, "a", prompt, 3);
-        let fp = obs
-            .iter_with_samples()
-            .next()
-            .map(|(fp, _, _)| fp.to_string())
-            .unwrap();
+        let before = build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default());
+        assert_eq!(before.len(), 1);
+        let fp = before[0].fingerprint.clone();
+
         obs.dismiss(&fp, 3);
         assert!(build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default()).is_empty());
 
@@ -241,25 +263,65 @@ mod tests {
         assert_eq!(proposals.len(), 1, "reappears once the cluster grew past 3");
     }
 
+    /// H1 regression: an opening longer than 120 chars fingerprints at every
+    /// `PREFIX_LENS` entry, so dismissing the single fingerprint the user was
+    /// shown (the shortest, post-dedup) must suppress *all* the longer
+    /// records too — not just the one dismissed. Pre-fix, the dismissal
+    /// filter ran before dedup, so the 70/85/100/120-char records (never
+    /// individually dismissed) survived the filter, got shortest-prefix-wins
+    /// promoted, and "Not now" immediately re-offered the same opening.
+    #[test]
+    fn dismissal_survives_multi_length_fingerprints() {
+        let mut obs = Observations::default();
+        let long_prompt = "please review the listener implementation end to end thoroughly \
+            and carefully, checking every code path for correctness and safety concerns \
+            before merging this into the main branch for release";
+        assert!(
+            long_prompt.chars().count() > 120,
+            "premise: opening must exceed every PREFIX_LENS entry"
+        );
+        observe_n_times(&mut obs, "a", long_prompt, 3);
+
+        let before = build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default());
+        assert_eq!(before.len(), 1, "dedup collapses all five lengths to one");
+        let fp = before[0].fingerprint.clone();
+        let count = before[0].count;
+
+        obs.dismiss(&fp, count);
+        assert!(
+            build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default()).is_empty(),
+            "dismissing the shown proposal must clear every longer-prefix record too"
+        );
+
+        observe_n_times(&mut obs, "b", long_prompt, 1);
+        let after = build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default());
+        assert_eq!(
+            after.len(),
+            1,
+            "reappears once the cluster grew past the dismissed count"
+        );
+        assert_eq!(after[0].fingerprint, fp);
+    }
+
     #[test]
     fn ordering_is_highest_count_first() {
         let mut obs = Observations::default();
         observe_n_times(
             &mut obs,
             "a",
-            "cluster with a modest count of three for testing",
+            "cluster with a modest count of three for testing, long enough to qualify",
             3,
         );
         observe_n_times(
             &mut obs,
             "b",
-            "cluster with a much larger count of seven right here",
+            "cluster with a much larger count of seven right here, long enough to qualify",
             7,
         );
         observe_n_times(
             &mut obs,
             "c",
-            "cluster with a middling count of five for this test",
+            "cluster with a middling count of five for this test, long enough to qualify",
             5,
         );
         let proposals = build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default());
@@ -273,14 +335,14 @@ mod tests {
         observe_n_times(
             &mut obs,
             "a",
-            "a cluster observed exactly three times for this test",
+            "a cluster observed exactly three times for this test, long enough to qualify",
             3,
         );
         let mut low = Observations::default();
         observe_n_times(
             &mut low,
             "a",
-            "a cluster observed only twice for this test case",
+            "a cluster observed only twice for this test case, long enough to qualify",
             2,
         );
         let proposals = build(&low, 1, &IgnoreRules::default(), &IgnoreRules::default());
@@ -293,6 +355,39 @@ mod tests {
             proposals.len(),
             1,
             "a 3-count cluster still qualifies at the floor"
+        );
+    }
+
+    /// PRD decision 6, measured: a naturally-short prompt (< 60 chars) is
+    /// sampled at its own length with no floor (`observe::sample`'s doc), so
+    /// without this filter it could still reach a proposal. `MIN_PROPOSE_SAMPLE_LEN`
+    /// closes that gap.
+    #[test]
+    fn sample_below_measured_floor_is_not_proposed() {
+        let mut obs = Observations::default();
+        let short = "please fix the config file"; // 27 chars, well under the floor
+        assert!(short.chars().count() < MIN_PROPOSE_SAMPLE_LEN);
+        observe_n_times(&mut obs, "a", short, 5);
+        let proposals = build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default());
+        assert!(
+            proposals.is_empty(),
+            "a sample below the measured floor must never be proposed, however often it repeats"
+        );
+    }
+
+    /// A sample at exactly the floor is still eligible — the filter is
+    /// `>= MIN_PROPOSE_SAMPLE_LEN`, not `>`.
+    #[test]
+    fn sample_at_the_floor_is_proposed() {
+        let mut obs = Observations::default();
+        let at_floor: String = "x".repeat(MIN_PROPOSE_SAMPLE_LEN);
+        assert_eq!(at_floor.chars().count(), MIN_PROPOSE_SAMPLE_LEN);
+        observe_n_times(&mut obs, "a", &at_floor, 3);
+        let proposals = build(&obs, 3, &IgnoreRules::default(), &IgnoreRules::default());
+        assert_eq!(
+            proposals.len(),
+            1,
+            "a sample exactly at the floor still qualifies"
         );
     }
 
