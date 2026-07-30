@@ -86,10 +86,10 @@ check that fails loudly if the decision turns out wrong.
 | --- | --- | --- | --- | --- |
 | 1 | Observation store shape | **`{fp: n}`** — count only, no session-id hashes | Unit test: the same session observed repeatedly within one run increments the count **once** (in-run dedup); a documented test asserts restart-mid-session may double-count and that this is tolerated | 2 |
 | 2 | Can a headless session block on the user? | **No** — headless sessions must never wait for input. Default policy is therefore **hide**, not mute | **Reveal-on-block guard**: a hidden session that reaches `NEEDS_YOU` is un-hidden and counted. If the premise holds, the branch never fires; if it fails, nobody is stranded | 3 |
-| 3 | Is the first prompt in the hook payload? | **Unknown — treated as "no."** Design already reads the transcript; payload availability would only be an optimisation | C1 capture asserts presence/absence of a prompt field across all wired events; a passing assert either unlocks the fast path or documents its absence | 6 |
+| 3 | Is the first prompt in the hook payload? | **Answered: no**, within the currently-verified schema — treated as "no", same as the placeholder decision. Design keeps reading the transcript; no fast path unlocked (`UserPromptSubmit`'s public `prompt` field is an unverified candidate, noted but not captured live) | `hook_payload_capture.rs` asserts presence/absence of a prompt field across all eight wired events against a **reconstructed, not captured**, sanitized schema (sourced from CLAUDE.md's two empirically-verified blocks plus `HookEvent`'s field docs — no live `UserPromptSubmit` body has been captured against this repo's own listener); recorded in `docs/measurements.md` | 6 |
 | 4 | `<task-notification>` (n=5) polarity | **Left unclassified** — and that is safe, because unclassified openings are merely *eligible* for clustering, so the worst case is one user-reviewed proposal | Registry is **config-editable**, so polarity is assignable later with no rebuild; a test asserts an unclassified marker neither forces nor blocks clustering | 3 |
 | 5 | Does precision survive off this machine? | **We don't claim it does.** Ship a per-user **self-audit** instead of a cross-user guarantee | Audit view lists every session a rule currently hides, with `hidden_count`; a test asserts the audit list exactly equals what `snapshot()` excluded | 5 |
-| 6 | The `never_hide` short-entry warning length | **No number ships until measured.** The warning is omitted in Phase 3 | Phase 6 measurement derives the length at which a prefix stops discriminating on the corpus; the warning ships with that value, or not at all | 6 |
+| 6 | The `never_hide` short-entry warning length / proposal-eligibility floor | **Answered: 60 characters, measured on the mixed-polarity case** — real corpus, 568 resolved prompts, mixed human/machine clusters at short lengths dropping to zero from 57 chars onward. **Does not measure**, and by construction cannot measure, the same-polarity case (a user's own unmarked opening repeating and colliding with an unmarked machine one) — see `docs/measurements.md` for why. Shipped as `config::MIN_PROPOSE_SAMPLE_LEN` gating `proposals::build`; the UI warning is shipped too, in `SessionFiltering.tsx`, sourced live from the backend constant via `min_propose_sample_len` | C6 sweep (`prefix_sweep.rs`, `#[ignore]`d); full table and method in `docs/measurements.md` | 6 |
 
 **Two of these changed the design**, not just the checkbox:
 
@@ -297,8 +297,8 @@ a readable log of your prompts sitting in JSON that gets synced, backed up, or a
 | 2 | Observation store | Salted-hash fingerprints, multi-length, expiry | **complete** | - | 1 | `.claude/PRPs/plans/completed/observation-store-and-allowlist.plan.md` |
 | 3 | Marker registry + allowlist | Human/machine polarity; user-authored `never_hide`, evaluated at ingest | **complete** | with 2 | 1 | `.claude/PRPs/plans/completed/observation-store-and-allowlist.plan.md` |
 | 4 | Clustering + proposals | Group, threshold floor 3, `list`/`accept`/`dismiss`/`clear` commands | **complete** | - | 2, 3 | `.claude/PRPs/plans/completed/clustering-and-proposals.plan.md` |
-| 5 | Settings UI | Rules editor, proposals, hidden-count, threshold control | pending | - | 4 | - |
-| 6 | Fixtures + validation | Corpus fixtures; C1 hook-payload capture; C2 cross-user | pending | with 5 | 4 | - |
+| 5 | Settings UI | Rules editor, proposals, hidden-count, threshold control | **complete** | - | 4 | `.claude/PRPs/plans/completed/settings-ui.plan.md` |
+| 6 | Fixtures + validation | Corpus fixtures; C1 hook-payload capture; C2 cross-user | **complete** | with 5 | 4 | `.claude/PRPs/plans/fixtures-and-validation.plan.md` |
 
 ### Phase Details
 
@@ -353,7 +353,7 @@ a readable log of your prompts sitting in JSON that gets synced, backed up, or a
   this phase's shortest-prefix de-duplication reads.
 - **Report**: `.claude/PRPs/reports/clustering-and-proposals-report.md`
 
-**Phase 5: Settings UI**
+**Phase 5: Settings UI** — *complete*
 - **Goal**: Make rules visible, auditable, and reversible.
 - **Scope**: Reuse `Section` / `Toggle` / `patch` in `src/settings/Settings.tsx`. Two editable
   lists (`ignore_rules`, `never_hide`) plus the read-only built-in markers; three-way proposal
@@ -364,8 +364,13 @@ a readable log of your prompts sitting in JSON that gets synced, backed up, or a
   count change; "Never suggest" moves a proposal into `never_hide` in one click; the tray line
   appears only when a proposal is live and never alters the tray icon; the card's live-session
   preview matches what actually disappears on accept.
+- **Plan**: `.claude/PRPs/plans/completed/settings-ui.plan.md` — also carried the Phase 4 review
+  findings **H1** (dismissal is defeated by the next prefix length — it blocks merge, and
+  "Not now" is this phase's own button), **L1**, **L2**, and **L5**, plus M1
+  follow-through #1 (the proposal card renders the sample's length).
+- **Report**: `.claude/PRPs/reports/settings-ui-report.md`
 
-**Phase 6: Fixtures + validation**
+**Phase 6: Fixtures + validation** — *complete*
 - **Goal**: Stop trusting one machine and one set of ad-hoc scripts.
 - **Scope**: Real captured sessions as fixtures, including the adversarial cases — a human
   session quoting a machine phrase; a SHA-named worktree; a machine and a human session sharing
@@ -381,6 +386,22 @@ a readable log of your prompts sitting in JSON that gets synced, backed up, or a
 - **Success signal**: Both measurements produce a recorded number (or a recorded "no signal");
   every adversarial fixture passes. Cross-user replay stays *desirable but not gating* — the
   shipped guarantee is the audit mechanism, not a precision figure we can't collect.
+- **Outcome**: Both measurements answered — decision 3: no (see decisions table); decision 6: a
+  clean 57-char knee, shipped as a 60-char `MIN_PROPOSE_SAMPLE_LEN` floor. 9 fixtures + a
+  replay suite (`corpus_replay.rs`, 12 tests) drive every named adversarial case through the real
+  ingest pipeline, plus the H1 dismissal regression at integration level. Full method, corpus
+  size, and results table in `docs/measurements.md`. Cross-user replay (C2) was not pursued —
+  as scoped, it stays desirable but not gating.
+- **Plan**: `.claude/PRPs/plans/fixtures-and-validation.plan.md` (archived to
+  `.claude/PRPs/plans/completed/`) — also carried M1 follow-through #2 (the sweep reports
+  separately on sub-60-char samples, and that number gates proposal eligibility, not just the
+  `never_hide` warning).
+- **Planned departure from this scope, on record**: fixtures are **authored to reproduce
+  the structures** the real corpus exhibited, not real captured sessions. Committing real
+  sessions would put real prompt text permanently into a repo that syncs and forks — the
+  exact exposure the salted-hash store exists to prevent. The real corpus stays local
+  behind `BEACON_CORPUS` and an `#[ignore]`d sweep: committed tests prove the *mechanism*,
+  the local sweep produces the *numbers*. Same trade as decision 5.
 
 ### Parallelism Notes
 
@@ -440,7 +461,7 @@ that convention deliberately.
 
 ---
 
-*Generated: 2026-07-28 · decisions resolved 2026-07-29*
+*Generated: 2026-07-28 · decisions resolved 2026-07-29 · measurements closed 2026-07-30*
 *Status: READY — Phase 1 shipped; no open questions. Every prior uncertainty is a decision with a
-test that fails loudly if it was wrong. Two measurements (hook-payload reachability, prefix
-discrimination length) are scheduled work in Phase 6, not blockers.*
+test that fails loudly if it was wrong. Both measurements (hook-payload reachability, prefix
+discrimination length) are closed as of Phase 6 — see `docs/measurements.md`.*

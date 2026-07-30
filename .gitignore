@@ -37,6 +37,12 @@ pnpm-debug.log*
 .claude/settings.local.json
 # Ephemeral per-worktree session state written by concurrent Claude Code sessions.
 .claude/worktrees/
+# Local workflow related Claude Files
+.claude/PRPs/
+.claude/rules/common/
+.claude/scripts/hooks/
+.claude/skills/
+
 
 # Internal scaffolding (design briefs, build prompts, planning docs) — kept in the
 # tree for contributors locally but not published as user-facing docs.
