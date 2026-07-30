@@ -26,9 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `never_hide` allowlist and reveal-on-block safety valve. `never_hide`
   entries always outrank `ignore_rules` for the same session, and are also
   never observed. Separately, any `ignore_rules`-hidden session that hits a
-  real block on you (a permission prompt, plan approval) is un-hidden for
-  the rest of its life and notifies as normal — a filter should never be
-  able to swallow a request that needs you specifically. See
+  real block on you (a permission prompt, plan approval) is un-hidden until
+  it restarts and notifies as normal — a filter should never be able to
+  swallow a request that needs you specifically. See
+  [docs/IGNORE-RULES.md](docs/IGNORE-RULES.md).
+- Suggested filters: Session Signals can now offer a ready-made ignore rule
+  built from an opening it actually observed repeating, instead of you
+  writing one by hand. Accept it to write the rule, dismiss it for this run,
+  or declare it your own permanently (which also purges it from the
+  observation store). Backed by a new `propose_threshold` setting (3 by
+  default, the minimum cluster size before a pattern is offered). See the
+  "Suggested filters" section of
   [docs/IGNORE-RULES.md](docs/IGNORE-RULES.md).
 
 ### Fixed
@@ -47,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sitting at **Working** (orange). These tools block on you the moment they fire
   but emit no notification the listener can see, so the engine now escalates on
   their `PreToolUse` and returns to **Working** once you answer.
+- A session that hit a permission prompt before its opening prompt was
+  classified could be hidden by a first-prompt ignore rule while genuinely
+  waiting on you — the late classification arriving after the block used to
+  hide it instead of leaving it revealed. It now stays visible.
 
 ## [0.3.0] - 2026-06-29
 

@@ -58,6 +58,10 @@ export interface Config {
   observe_enabled: boolean;
   /// Days an observation record is kept before being pruned.
   observe_retain_days: number;
+  /// Minimum cluster size before an observed opening is offered as a filter
+  /// proposal. Floored at 3 by the backend (`sanitized()` and `proposals::build`),
+  /// not enforced here.
+  propose_threshold: number;
 }
 
 /// Built-in notification sounds offered in the UI (macOS system sound names).
@@ -84,4 +88,5 @@ export const DEFAULT_CONFIG: Config = {
   markers: [],
   observe_enabled: true,
   observe_retain_days: 30,
+  propose_threshold: 3,
 };

@@ -810,6 +810,7 @@ impl Engine {
             sessions,
             ignore,
             never_hide,
+            reveal_count,
             ..
         } = self;
         match sessions.get_mut(id) {
@@ -820,7 +821,20 @@ impl Engine {
                     s.first_prompt = value;
                 }
                 s.first_prompt_checked_at = Some(Instant::now());
-                session_hidden(ignore, never_hide, s) != was
+                let now_hidden = session_hidden(ignore, never_hide, s);
+                // A session that is *already* blocked must not be hidden by a
+                // late classification. `transition_to` guards the other
+                // direction (hidden, then blocked); this is the same valve at
+                // the other point where hidden-ness can flip — and it is the
+                // *normal* ordering for a first-prompt rule, since
+                // `SessionStart` fires before any prompt exists so
+                // classification is always deferred to a retry ≥5s later.
+                if now_hidden && !was && s.state == State::NeedsYou && !s.revealed {
+                    s.revealed = true;
+                    *reveal_count += 1;
+                    return false; // hidden-ness did not change: it stayed visible
+                }
+                now_hidden != was
             }
         }
     }
@@ -923,6 +937,30 @@ impl Engine {
         }
     }
 
+    /// Build the serializable view of one session. Extracted from `snapshot`
+    /// (pure extraction, identical behaviour) so `preview_hidden_by` can reuse
+    /// it without duplicating the field mapping.
+    fn view_of(id: &str, s: &Session, now: Instant) -> SessionView {
+        let (folder, branch, worktree) = label_parts_worktree(&s.cwd);
+        SessionView {
+            session_id: id.to_string(),
+            label: combine_label(folder.clone(), branch.as_deref()),
+            folder,
+            branch,
+            worktree,
+            state: s.state,
+            stale: s.stale,
+            seconds_in_state: now.duration_since(s.state_since).as_secs(),
+            subagent_count: s.subagent_count,
+            subagent_seconds: s
+                .sub_since
+                .map(|t| now.duration_since(t).as_secs())
+                .unwrap_or(0),
+            can_focus: s.terminal_pid.is_some(),
+            descriptor: s.descriptor.clone(),
+        }
+    }
+
     /// A serializable snapshot of all sessions, newest-active first.
     pub fn snapshot(&self) -> Vec<SessionView> {
         let now = Instant::now();
@@ -933,29 +971,33 @@ impl Engine {
             .iter()
             // Filtered (headless/machine-spawned) sessions never reach the widget.
             .filter(|(_, s)| !session_hidden(ignore, never_hide, s))
-            .map(|(id, s)| {
-                let (folder, branch, worktree) = label_parts_worktree(&s.cwd);
-                SessionView {
-                    session_id: id.clone(),
-                    label: combine_label(folder.clone(), branch.as_deref()),
-                    folder,
-                    branch,
-                    worktree,
-                    state: s.state,
-                    stale: s.stale,
-                    seconds_in_state: now.duration_since(s.state_since).as_secs(),
-                    subagent_count: s.subagent_count,
-                    subagent_seconds: s
-                        .sub_since
-                        .map(|t| now.duration_since(t).as_secs())
-                        .unwrap_or(0),
-                    can_focus: s.terminal_pid.is_some(),
-                    descriptor: s.descriptor.clone(),
-                }
-            })
+            .map(|(id, s)| Engine::view_of(id, s, now))
             .collect();
         // Stable, useful ordering: live before stale, then by label.
         views.sort_by(|a, b| a.stale.cmp(&b.stale).then_with(|| a.label.cmp(&b.label)));
+        views
+    }
+
+    /// Which currently-visible sessions would disappear if `matcher` were
+    /// appended to the ignore rules. Computed by re-running the real
+    /// `session_hidden` against a candidate rule set, so the preview can never
+    /// drift from the behaviour it predicts — including `never_hide`
+    /// precedence and the sticky `revealed` flag, both of which mean a session
+    /// matching the pattern may nonetheless *not* disappear. Never mutates the
+    /// engine's live rules.
+    pub fn preview_hidden_by(&self, matcher: crate::ignore::Matcher) -> Vec<SessionView> {
+        let now = Instant::now();
+        let candidate = self.ignore.with(matcher);
+        let mut views: Vec<SessionView> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| {
+                !session_hidden(&self.ignore, &self.never_hide, s)
+                    && session_hidden(&candidate, &self.never_hide, s)
+            })
+            .map(|(id, s)| Engine::view_of(id, s, now))
+            .collect();
+        views.sort_by(|a, b| a.label.cmp(&b.label));
         views
     }
 }
@@ -2127,6 +2169,123 @@ mod tests {
         ));
         assert_eq!(e.reveal_count(), 0);
         assert!(e.is_hidden("bot"));
+    }
+
+    /// H1: `SessionStart` fires before any prompt exists, so a first-prompt
+    /// rule's classification is always deferred to a later retry. If that
+    /// session hits NeedsYou *before* the retry resolves, the late
+    /// classification must not hide it — the pre-fix tree hid it instead
+    /// (`is_hidden=true, snapshot_len=0, rollup=Grey, reveal_count=0`).
+    #[test]
+    fn session_blocked_before_classification_is_not_hidden() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        // No first_prompt yet, so the first-prompt rule can't hide it: the
+        // session reaches NeedsYou visible.
+        e.apply(&ev("UserPromptSubmit", "bot"));
+        e.apply(&notif("bot", "permission_prompt"));
+        assert!(
+            !e.is_hidden("bot"),
+            "premise: visible before classification"
+        );
+        assert_eq!(e.reveal_count(), 0);
+
+        // The deferred retry now resolves a first prompt matching the rule —
+        // the classification arrives late, after the block.
+        let changed = e.set_first_prompt(
+            "bot",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        assert!(!changed, "hidden-ness did not change: it stayed visible");
+        assert!(!e.is_hidden("bot"));
+        assert_eq!(e.snapshot().len(), 1);
+        assert_eq!(e.rollup(), Rollup::Red);
+        assert_eq!(e.reveal_count(), 1);
+    }
+
+    /// `preview_hidden_by` lists exactly the sessions that would newly
+    /// disappear: one matching, one already hidden by an existing rule
+    /// (already gone, not newly hidden), one unrelated.
+    #[test]
+    fn preview_lists_only_sessions_that_would_vanish() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "already-hidden".to_string(),
+            },
+        ]));
+        e.apply(&ev_cwd("SessionStart", "matching", "/tmp/proj-a"));
+        e.apply(&ev_cwd("SessionStart", "already", "/tmp/already-hidden"));
+        e.apply(&ev_cwd("SessionStart", "unrelated", "/tmp/proj-b"));
+
+        let preview = e.preview_hidden_by(crate::ignore::Matcher::CwdContains {
+            value: "proj-a".to_string(),
+        });
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].session_id, "matching");
+    }
+
+    /// A session matching the candidate pattern but allowlisted via
+    /// `never_hide`, and one already `revealed` (blocked while hidden),
+    /// must both be absent from the preview — the same fail-open rules
+    /// `session_hidden` enforces for real.
+    #[test]
+    fn preview_excludes_never_hide_and_revealed() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_never_hide(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "allowlisted".to_string(),
+            },
+        ]));
+        e.apply(&ev_cwd(
+            "SessionStart",
+            "allowlisted",
+            "/tmp/allowlisted-proj",
+        ));
+
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "revealed",
+            "/x/.local/share/ecc-homunculus/projects/deadbeef",
+        ));
+        // A Notification carrying the *same* (still-hidden) cwd — the generic
+        // `notif` helper would overwrite it with `/tmp/proj` (a visible path)
+        // before the reveal check runs, same reasoning as
+        // `hidden_session_that_blocks_is_revealed`.
+        e.apply(&HookEvent {
+            hook_event_name: "Notification".to_string(),
+            session_id: "revealed".to_string(),
+            cwd: "/x/.local/share/ecc-homunculus/projects/deadbeef".to_string(),
+            notification_type: Some("permission_prompt".to_string()),
+            ..Default::default()
+        });
+        assert!(!e.is_hidden("revealed"), "revealed sticks visible");
+
+        let preview = e.preview_hidden_by(crate::ignore::Matcher::CwdContains {
+            value: "proj".to_string(),
+        });
+        assert!(
+            preview.iter().all(|v| v.session_id != "allowlisted"),
+            "never_hide wins"
+        );
+        assert!(
+            preview.iter().all(|v| v.session_id != "revealed"),
+            "sticky reveal wins"
+        );
+    }
+
+    /// A preview call must never mutate the engine's live rules — the
+    /// candidate set is thrown away after the call.
+    #[test]
+    fn preview_does_not_mutate_engine_rules() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev_cwd("SessionStart", "a", "/tmp/proj-a"));
+        let before = e.hidden_count();
+        let _ = e.preview_hidden_by(crate::ignore::Matcher::CwdContains {
+            value: "proj-a".to_string(),
+        });
+        assert_eq!(e.hidden_count(), before);
     }
 
     #[test]

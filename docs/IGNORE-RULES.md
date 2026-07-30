@@ -101,10 +101,49 @@ records are left alone until you clear them.
 ### A hidden session that blocks on you always reappears
 
 If a session hidden by `ignore_rules` ever needs you — a permission prompt, a
-plan to approve — it is un-hidden for the rest of its life, notifies like any
+plan to approve — it is un-hidden **until it restarts**, notifies like any
 other session, and colours the tray red. This is a safety valve, not a bug:
 a filter is a guess about what's machine-spawned, and a guess should never be
-allowed to swallow a request for you specifically.
+allowed to swallow a request for you specifically. A genuine restart
+(`SessionStart`) clears the reveal, so the rule applies normally again from
+the next run.
+
+## Suggested filters
+
+Instead of writing a rule by hand, Session Signals can offer you one built from
+a pattern it actually observed. `list_proposals` returns every eligible
+cluster — an opening seen at least `propose_threshold` times (3 by default,
+floored at 3 in code) — highest count first, each with its readable sample
+text and the currently-visible sessions that would disappear on accept.
+
+Three actions, none of them automatic:
+
+- **Accept** (`accept_proposal`) — writes the sample as a `first_prompt_prefix`
+  entry in `ignore_rules`. Idempotent: accepting twice writes one rule.
+- **Dismiss** (`dismiss_proposal`) — "not now," this run only. The proposal
+  reappears once the cluster grows past its count at dismissal.
+- **Never suggest** (`never_suggest_proposal`) — adds the sample to
+  `never_hide` *and* purges every fingerprint whose live sample is
+  prefix-related to it from the observation store, so it stops surfacing
+  again this run. A record with no live sample (carried over from a previous
+  run) can't be matched to that family and may still exist on disk — hashes
+  are one-way, so a purge can never be total across a restart.
+  `clear_observations` is the full reset if you want one.
+
+Nothing is applied without one of these three actions — a proposal sitting
+unaddressed changes nothing.
+
+Two honest caveats:
+
+- **A cluster that crossed the threshold entirely in a previous run
+  surfaces only after one more matching session re-supplies the sample
+  text.** The count is persisted; the readable sample is not (see "What
+  Session Signals records" above). This is a delay, not a loss — the
+  alternative was persisting plaintext.
+- **The preview list (`matching`) can be shorter than `count`.** `count`
+  groups on the whitespace-normalized opening; the rule a proposal writes is
+  a literal prefix, and only sessions live *right now* can appear in the
+  preview. Seeing fewer rows than the count is expected, not a bug.
 
 ## Recipe: ECC (`continuous-learning` / homunculus observer)
 

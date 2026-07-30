@@ -17,13 +17,14 @@ mod listener;
 pub mod markers;
 mod notify;
 pub mod observe;
+pub mod proposals;
 pub mod token;
 mod tray;
 mod windows;
 
 use config::Config;
 use engine::{CapturedTerminal, Engine, HookEvent, Rollup, SessionView, Transition};
-use ignore::IgnoreRules;
+use ignore::{IgnoreRules, Matcher};
 use notify::Notifier;
 use observe::Observations;
 use serde::Serialize;
@@ -549,6 +550,108 @@ fn set_config(app: AppHandle, new: Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Eligible filter proposals, highest count first, each with the live
+/// sessions it would hide. Returns the full list (Phase 5's card renders
+/// only the head — a list on screen invites bulk-accept, which is auto-hide
+/// with extra steps — but the count drives the tray line).
+#[tauri::command]
+fn list_proposals(app: AppHandle) -> Vec<proposals::Proposal> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock_safe().clone();
+    let ignore = IgnoreRules::new(cfg.ignore_rules.clone());
+    let never_hide = IgnoreRules::new(cfg.never_hide.clone());
+    // Build under the observations lock, then drop it — the engine lock is
+    // taken only after, mirroring `observe_opening`'s established order
+    // (never nest the engine lock under the observations lock).
+    let mut list = {
+        let obs = state.observations.lock_safe();
+        proposals::build(&obs, cfg.propose_threshold, &ignore, &never_hide)
+    };
+    let eng = state.engine.lock_safe();
+    for p in &mut list {
+        p.matching = eng.preview_hidden_by(Matcher::FirstPromptPrefix {
+            value: p.sample.clone(),
+        });
+    }
+    list
+}
+
+/// Accept a proposal: write its sample as a `first_prompt_prefix` ignore
+/// rule via `set_config`, which owns persistence, the engine swap, and the
+/// `config-updated` broadcast. Idempotent — accepting twice is a no-op, not
+/// a duplicate rule.
+#[tauri::command]
+fn accept_proposal(app: AppHandle, fingerprint: String) -> Result<(), String> {
+    let sample = {
+        let state = app.state::<AppState>();
+        let obs = state.observations.lock_safe();
+        obs.sample_for(&fingerprint).map(|s| s.to_string())
+    };
+    let Some(sample) = sample else {
+        return Err("proposal is no longer available".to_string());
+    };
+    let mut cfg = get_config(app.state::<AppState>());
+    let matcher = Matcher::FirstPromptPrefix { value: sample };
+    if cfg.ignore_rules.contains(&matcher) {
+        return Ok(());
+    }
+    cfg.ignore_rules.push(matcher);
+    set_config(app, cfg)
+}
+
+/// Refuse a proposal for this run only: recorded against its current cluster
+/// count, so it reappears once the cluster grows past that count. Not
+/// persisted — see `Observations::dismiss`.
+#[tauri::command]
+fn dismiss_proposal(app: AppHandle, fingerprint: String) {
+    let state = app.state::<AppState>();
+    let mut obs = state.observations.lock_safe();
+    let count = obs
+        .iter_with_samples()
+        .find(|(fp, _, _)| *fp == fingerprint)
+        .map(|(_, rec, _)| rec.n);
+    if let Some(n) = count {
+        obs.dismiss(&fingerprint, n);
+    }
+}
+
+/// Refuse a proposal permanently: add its sample to `never_hide` (via
+/// `set_config`) and purge its fingerprint family from the observation
+/// store. Purge runs **after** `set_config` succeeds — a failed config save
+/// must not leave the cluster purged and the rule unwritten.
+#[tauri::command]
+fn never_suggest_proposal(app: AppHandle, fingerprint: String) -> Result<(), String> {
+    let sample = {
+        let state = app.state::<AppState>();
+        let obs = state.observations.lock_safe();
+        obs.sample_for(&fingerprint).map(|s| s.to_string())
+    };
+    let Some(sample) = sample else {
+        return Err("proposal is no longer available".to_string());
+    };
+    let mut cfg = get_config(app.state::<AppState>());
+    let matcher = Matcher::FirstPromptPrefix { value: sample };
+    if !cfg.never_hide.contains(&matcher) {
+        cfg.never_hide.push(matcher);
+    }
+    set_config(app.clone(), cfg)?;
+    let state = app.state::<AppState>();
+    let mut obs = state.observations.lock_safe();
+    obs.purge_family(&fingerprint);
+    save_observations(&app, &obs);
+    Ok(())
+}
+
+/// Wipe every observation record immediately — the user clicked "clear" and
+/// expects the store to change now, not on the next sweep tick.
+#[tauri::command]
+fn clear_observations(app: AppHandle) {
+    let state = app.state::<AppState>();
+    let mut obs = state.observations.lock_safe();
+    obs.clear();
+    save_observations(&app, &obs);
+}
+
 /// Receive the active theme's palette from the webview, persist it, and restyle
 /// the tray + notification icons. This is the *only* path appearance reaches the
 /// native side, so a new theme is pure frontend data — no Rust change, no assets.
@@ -732,6 +835,11 @@ pub fn run() {
             get_snapshot,
             get_config,
             set_config,
+            list_proposals,
+            accept_proposal,
+            dismiss_proposal,
+            never_suggest_proposal,
+            clear_observations,
             set_tray_palette,
             install_hooks,
             uninstall_hooks,

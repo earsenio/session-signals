@@ -296,7 +296,7 @@ a readable log of your prompts sitting in JSON that gets synced, backed up, or a
 | 1 | Foundation fixes | Latch retry, array-content extraction, IDE markers, drop `folder_hex`, empty defaults, opt-in docs | **complete** | - | - | `docs/internal/implementation-plan.md` §A |
 | 2 | Observation store | Salted-hash fingerprints, multi-length, expiry | **complete** | - | 1 | `.claude/PRPs/plans/completed/observation-store-and-allowlist.plan.md` |
 | 3 | Marker registry + allowlist | Human/machine polarity; user-authored `never_hide`, evaluated at ingest | **complete** | with 2 | 1 | `.claude/PRPs/plans/completed/observation-store-and-allowlist.plan.md` |
-| 4 | Clustering + proposals | Group, threshold floor 3, `list`/`accept`/`dismiss`/`clear` commands | **in-progress** | - | 2, 3 | `.claude/PRPs/plans/clustering-and-proposals.plan.md` |
+| 4 | Clustering + proposals | Group, threshold floor 3, `list`/`accept`/`dismiss`/`clear` commands | **complete** | - | 2, 3 | `.claude/PRPs/plans/completed/clustering-and-proposals.plan.md` |
 | 5 | Settings UI | Rules editor, proposals, hidden-count, threshold control | pending | - | 4 | - |
 | 6 | Fixtures + validation | Corpus fixtures; C1 hook-payload capture; C2 cross-user | pending | with 5 | 4 | - |
 
@@ -339,18 +339,19 @@ a readable log of your prompts sitting in JSON that gets synced, backed up, or a
   hidden session driven to `NEEDS_YOU` reappears in `snapshot()` and increments the reveal counter.
 - **Report**: `.claude/PRPs/reports/observation-store-and-allowlist-report.md`
 
-**Phase 4: Clustering + proposals**
+**Phase 4: Clustering + proposals** — *complete*
 - **Goal**: Turn observations into an offer.
 - **Scope**: Group eligible fingerprints; shortest-prefix-wins de-duplication across lengths;
   floor-3 clamp; commands `list_proposals`, `accept_proposal`, `dismiss_proposal`,
   `never_suggest_proposal` (→ `never_hide` + purge), `clear_observations`.
-- **Success signal**: Corpus replay yields exactly 2 proposals, 0 false positives. A synthetic
-  corpus of repeated *human* openings yields proposals that, once dismissed via
-  "never suggest", do not return as the cluster grows.
-- **Plan**: `.claude/PRPs/plans/clustering-and-proposals.plan.md` — also carries the
-  Phase 2/3 review findings H1, M1, M2, because M2 changes `Observation.len`, which
-  this phase's shortest-prefix de-duplication reads. Real 577-session corpus replay
-  is deferred to Phase 6 (which owns the fixtures); Phase 4 replays a synthetic corpus.
+- **Success signal**: Synthetic corpus replay yields one proposal per family (two machine
+  families surfaced, a repeated-human blind-spot case documented and removable via
+  "never suggest"). Real 577-session corpus replay with an exact false-positive count is
+  deferred to Phase 6, which owns the fixtures.
+- **Plan**: `.claude/PRPs/plans/completed/clustering-and-proposals.plan.md` — also carried
+  the Phase 2/3 review findings H1, M1, M2, because M2 changes `Observation.len`, which
+  this phase's shortest-prefix de-duplication reads.
+- **Report**: `.claude/PRPs/reports/clustering-and-proposals-report.md`
 
 **Phase 5: Settings UI**
 - **Goal**: Make rules visible, auditable, and reversible.

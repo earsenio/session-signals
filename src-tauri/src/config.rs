@@ -25,6 +25,13 @@ pub const DEFAULT_STALE_MIN: u64 = 10;
 pub const DEFAULT_IDLE_DROP_MIN: u64 = 60;
 /// Days an observation record survives before `prune` drops it.
 pub const DEFAULT_OBSERVE_RETAIN_DAYS: u64 = 30;
+/// Default minimum cluster size before an observed opening is offered as a
+/// filter proposal.
+pub const DEFAULT_PROPOSE_THRESHOLD: u32 = 3;
+/// Floor for `propose_threshold`, enforced in [`Config::sanitized`] and
+/// re-enforced in `proposals::build` — measured leakage on the research
+/// corpus was 26 human patterns at 1, 3 at 2, and 0 at 3.
+pub const MIN_PROPOSE_THRESHOLD: u32 = 3;
 
 /// Built-in notification sounds (macOS system sound names under
 /// `/System/Library/Sounds`). The settings UI offers this set.
@@ -116,10 +123,21 @@ pub struct Config {
     /// to [`DEFAULT_OBSERVE_RETAIN_DAYS`] — there's no "never" here.
     #[serde(default)]
     pub observe_retain_days: u64,
+    /// Minimum cluster size before an observed opening is offered as a
+    /// filter proposal. **Floored at [`MIN_PROPOSE_THRESHOLD`] in
+    /// `sanitized()`, not in the UI** — measured leakage on the research
+    /// corpus was 26 human patterns at 1, 3 at 2, and 0 at 3, and a UI-only
+    /// default is bypassable by hand-editing this file.
+    #[serde(default = "default_propose_threshold")]
+    pub propose_threshold: u32,
 }
 
 fn default_observe_enabled() -> bool {
     true
+}
+
+fn default_propose_threshold() -> u32 {
+    DEFAULT_PROPOSE_THRESHOLD
 }
 
 impl Default for Config {
@@ -142,6 +160,7 @@ impl Default for Config {
             markers: Vec::new(),
             observe_enabled: true,
             observe_retain_days: DEFAULT_OBSERVE_RETAIN_DAYS,
+            propose_threshold: DEFAULT_PROPOSE_THRESHOLD,
         }
     }
 }
@@ -167,6 +186,9 @@ impl Config {
         }
         if self.observe_retain_days == 0 {
             self.observe_retain_days = DEFAULT_OBSERVE_RETAIN_DAYS;
+        }
+        if self.propose_threshold < MIN_PROPOSE_THRESHOLD {
+            self.propose_threshold = MIN_PROPOSE_THRESHOLD;
         }
         self.version = CURRENT_VERSION;
         self
@@ -223,6 +245,7 @@ mod tests {
         assert!(cfg.markers.is_empty());
         assert!(cfg.observe_enabled);
         assert_eq!(cfg.observe_retain_days, DEFAULT_OBSERVE_RETAIN_DAYS);
+        assert_eq!(cfg.propose_threshold, DEFAULT_PROPOSE_THRESHOLD);
     }
 
     #[test]
@@ -233,5 +256,17 @@ mod tests {
         };
         cfg = cfg.sanitized();
         assert_eq!(cfg.observe_retain_days, DEFAULT_OBSERVE_RETAIN_DAYS);
+    }
+
+    #[test]
+    fn propose_threshold_below_floor_is_clamped() {
+        for (input, expected) in [(0, 3), (1, 3), (5, 5)] {
+            let cfg = Config {
+                propose_threshold: input,
+                ..Config::default()
+            }
+            .sanitized();
+            assert_eq!(cfg.propose_threshold, expected, "input {input}");
+        }
     }
 }

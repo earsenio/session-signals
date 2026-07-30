@@ -138,6 +138,15 @@ impl IgnoreRules {
             .iter()
             .any(|m| matches!(m, Matcher::FirstPromptPrefix { .. }))
     }
+
+    /// The "what would happen if…" constructor: a new rule set with `extra`
+    /// appended, leaving `self` untouched. Used to build a candidate rule set
+    /// for a proposal preview without ever mutating the engine's live rules.
+    pub fn with(&self, extra: Matcher) -> IgnoreRules {
+        let mut matchers = self.matchers.clone();
+        matchers.push(extra);
+        IgnoreRules { matchers }
+    }
 }
 
 /// Case-insensitive substring test (ASCII-lowercased; paths/notes are ASCII).
@@ -267,6 +276,17 @@ mod tests {
         );
         assert!(!r.matches("/home/me/ordinary", Some("please fix the listener")));
         assert!(!r.matches("/home/me/ordinary", None));
+    }
+
+    #[test]
+    fn with_appends_without_mutating_self() {
+        let base = IgnoreRules::new(vec![Matcher::CwdContains { value: "a".into() }]);
+        let extended = base.with(Matcher::FirstPromptPrefix {
+            value: "hello".into(),
+        });
+        assert!(!base.has_prompt_rules(), "self is untouched");
+        assert!(extended.has_prompt_rules());
+        assert!(extended.cwd_hidden("has an a in it"), "original rule kept");
     }
 
     #[test]
