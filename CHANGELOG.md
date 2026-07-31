@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discovery surface for a waiting proposal — it never changes the tray icon
   or colour. See
   ["Managing rules in Settings"](docs/IGNORING_BOT_SPAWNED_SESSIONS.md#managing-rules-in-settings).
+- Linux VM / WSL session support — surface Claude Code sessions running inside
+  local Linux VMs/WSL on the tray and widget, tagged with a `VM` badge. Works
+  over WSL mirrored networking (direct loopback) or a self-healing host bridge
+  (portproxy + guest forwarder) for NAT WSL / full VMs.
+- `tools/vm-bridge/` — guest hook installers, host bridge scripts, and a setup
+  guide for the above.
 
 ### Fixed
 - Prompts sent as content blocks (rather than a plain string) are now read

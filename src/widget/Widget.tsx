@@ -178,6 +178,11 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
         <div className="wRowMain">
           <div className="wRowLabel">
             <span className="wRowFolder">{folder}</span>
+            {session.origin === "remote" && (
+              <span className="wRowRemote" title="Runs in a Linux VM / WSL" aria-label="VM session">
+                VM
+              </span>
+            )}
             {session.worktree && (
               <span className="wRowWorktree" title="git worktree" aria-label="git worktree">
                 worktree
@@ -329,9 +334,11 @@ function CompactPill({
                 key={s.session_id}
                 className="wStripGlyph"
                 style={{ opacity: s.stale ? 0.5 : 1 }}
-                title={`${s.label}${s.worktree ? " · worktree" : ""}${
-                  s.descriptor ? ` — ${s.descriptor}` : ""
-                } — ${s.stale ? "No response" : ROW_STATE_TEXT[s.state]}`}
+                title={`${s.label}${s.origin === "remote" ? " · VM" : ""}${
+                  s.worktree ? " · worktree" : ""
+                }${s.descriptor ? ` — ${s.descriptor}` : ""} — ${
+                  s.stale ? "No response" : ROW_STATE_TEXT[s.state]
+                }`}
               >
                 <StateGlyph
                   shape={s.stale ? "ring" : shapeForState(s.state)}
