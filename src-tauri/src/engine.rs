@@ -6,6 +6,7 @@
 //! `lib.rs` owns it behind a `Mutex` and reacts to changes by refreshing the
 //! tray and emitting to the webview. The UI never derives state itself.
 
+use crate::ignore::IgnoreRules;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,33 @@ pub enum Rollup {
     Orange,
     Green,
     Grey,
+}
+
+/// Where a session physically runs, so the widget can visually distinguish a
+/// session bridged in from a Linux VM/WSL from one on the host itself. Two VMs
+/// whose project folders share a basename would otherwise render identically
+/// (the host can't read a VM path's git branch either). Display-only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    /// A session on this machine.
+    Host,
+    /// A session reaching us from a Linux VM/WSL (over the bridge or mirrored
+    /// loopback).
+    Remote,
+}
+
+/// Heuristic origin from a session's cwd. **Windows-host only:** a native
+/// Windows session's cwd is a drive path (`C:\...`), so a POSIX-absolute cwd
+/// (leading `/`) means the session runs in a Linux VM/WSL and reached us over
+/// the bridge. On a POSIX host we can't tell host from guest by path alone, so
+/// we never guess (every row stays `Host`).
+fn origin_from_cwd(cwd: &str) -> Origin {
+    if cfg!(target_os = "windows") && cwd.starts_with('/') {
+        Origin::Remote
+    } else {
+        Origin::Host
+    }
 }
 
 /// A single tracked Claude Code session.
@@ -73,6 +101,26 @@ struct Session {
     /// When we last *attempted* to (re)derive `descriptor`. Debounces the
     /// transcript read so we don't re-scan the file on every hook event.
     descriptor_checked_at: Option<Instant>,
+    /// The session's first prompt (transcript head), cached for the first-prompt
+    /// ignore rule (`ignore::Matcher::FirstPromptPrefix`). `None` until read.
+    /// Hidden-ness is computed on the fly from this + the cwd + the current
+    /// rules, so a rule change takes effect immediately with no per-session
+    /// recomputation.
+    first_prompt: Option<String>,
+    /// When we last *attempted* the first-prompt head-read. A timestamp, not a
+    /// bool: the first event carrying a `transcript_path` is `SessionStart`,
+    /// which fires *before* any prompt exists, so the first read always comes
+    /// back empty. A one-shot flag would latch there and the rule could never
+    /// fire again for the session's whole life. Mirrors `descriptor_checked_at`
+    /// — retry on a cadence while unresolved, stop once we have a value.
+    first_prompt_checked_at: Option<Instant>,
+    /// True once this (currently ignore-rule-hidden) session has hit
+    /// `NeedsYou` — the reveal-on-block safety valve. **Sticky**, not
+    /// "visible while red": clearing it the moment the session leaves
+    /// NeedsYou would make the row vanish again on the very next event, which
+    /// reads as a bug. Reset only on a genuine `SessionStart` (a real
+    /// restart), next to `reset_subagents`.
+    revealed: bool,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -170,6 +218,9 @@ pub struct SessionView {
     /// subtle marker so a worktree session is distinguishable from a checkout of
     /// the same repo. Display-only.
     pub worktree: bool,
+    /// Where the session runs (host vs a bridged Linux VM/WSL). Display-only —
+    /// the widget tags remote rows so same-named VM folders are distinguishable.
+    pub origin: Origin,
     pub state: State,
     pub stale: bool,
     /// Seconds the session has been in its current state.
@@ -226,6 +277,25 @@ pub struct Engine {
     /// 60 min) so an idle session persists rather than blinking out, while a
     /// terminal killed without firing `SessionEnd` still eventually self-clears.
     drop_timeout: Duration,
+    /// Rules that hide non-interactive / machine-spawned sessions (headless
+    /// `--print` agents) from `snapshot` and `rollup`. Seeded from config at
+    /// startup and swapped on a config change. Empty by default (hide nothing),
+    /// so tests that don't set rules see every session.
+    ignore: IgnoreRules,
+    /// Whether observation (see `observe.rs`) is on. Gates the first-prompt
+    /// head-read in `first_prompt_due` independently of `ignore`'s own
+    /// prompt rules — on a fresh install there are no rules, so without this
+    /// the transcript head would never be read and observation would see
+    /// nothing. Defaults to `false` so existing tests, which never call
+    /// `set_observe_enabled`, see unchanged behaviour.
+    observe_enabled: bool,
+    /// Openings the user has declared their own. Outranks `ignore` entirely —
+    /// see `session_hidden`. Empty by default, matching `ignore`.
+    never_hide: IgnoreRules,
+    /// How many times the reveal-on-block safety valve has fired this run
+    /// (a hidden session driven to NeedsYou). In-memory only, a diagnostic —
+    /// not persisted, no pruning semantics needed.
+    reveal_count: u64,
 }
 
 impl Engine {
@@ -236,6 +306,10 @@ impl Engine {
             recent_ends: HashMap::new(),
             stale_timeout,
             drop_timeout,
+            ignore: IgnoreRules::default(),
+            observe_enabled: false,
+            never_hide: IgnoreRules::default(),
+            reveal_count: 0,
         }
     }
 
@@ -272,6 +346,12 @@ impl Engine {
                 } else {
                     let out = self.transition_to(ev, State::Ready);
                     self.reset_subagents(&ev.session_id);
+                    // A genuine restart clears a sticky reveal too — this is
+                    // a fresh run, not a continuation of the block that
+                    // triggered it.
+                    if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+                        s.revealed = false;
+                    }
                     out
                 }
             }
@@ -406,6 +486,9 @@ impl Engine {
                         terminal_tty: None,
                         descriptor: None,
                         descriptor_checked_at: None,
+                        first_prompt: None,
+                        first_prompt_checked_at: None,
+                        revealed: false,
                     });
                 if ev.terminal_pid.is_some() {
                     s.terminal_pid = ev.terminal_pid;
@@ -542,10 +625,34 @@ impl Engine {
                     terminal_tty: cap.tty,
                     descriptor: None,
                     descriptor_checked_at: None,
+                    first_prompt: None,
+                    first_prompt_checked_at: None,
+                    revealed: false,
                 });
                 (Some(None), cwd, pid)
             }
         };
+
+        // Reveal-on-block: a currently-hidden session that just hit NeedsYou
+        // still needs the user, so it must not stay invisible. Checked before
+        // marking `revealed` so `session_hidden` evaluates the ignore rules
+        // normally (not short-circuited by the flag we're about to set).
+        // Sticky: only set here, never cleared until a genuine SessionStart.
+        if state == State::NeedsYou {
+            let Engine {
+                sessions,
+                ignore,
+                never_hide,
+                reveal_count,
+                ..
+            } = self;
+            if let Some(s) = sessions.get_mut(&ev.session_id) {
+                if !s.revealed && session_hidden(ignore, never_hide, s) {
+                    s.revealed = true;
+                    *reveal_count += 1;
+                }
+            }
+        }
 
         let transition = from.map(|prev| {
             let (folder, branch) = label_parts(&cwd);
@@ -655,6 +762,136 @@ impl Engine {
         self.drop_timeout = timeout;
     }
 
+    /// Replace the session ignore rules (a config change). Hidden-ness is
+    /// computed on the fly from these rules, so existing sessions are re-judged
+    /// immediately with no bookkeeping. If the new rules can match on the first
+    /// prompt, clear the per-session "checked" flag for sessions that never
+    /// resolved one, so their next event re-reads the transcript head under the
+    /// new rules.
+    pub fn set_ignore_rules(&mut self, rules: IgnoreRules) {
+        let recheck_prompts = rules.has_prompt_rules();
+        self.ignore = rules;
+        if recheck_prompts {
+            for s in self.sessions.values_mut() {
+                if s.first_prompt.is_none() {
+                    s.first_prompt_checked_at = None;
+                }
+            }
+        }
+    }
+
+    /// Replace the `never_hide` allowlist (a config change). Like
+    /// `set_ignore_rules`, hidden-ness is computed on the fly, so a newly
+    /// allowlisted opening becomes visible immediately with no bookkeeping.
+    /// Unlike `set_ignore_rules`, it never needs to force a re-read of the
+    /// transcript head: `never_hide` only ever *reveals* sessions the deny
+    /// path would otherwise hide, and any session it could match already had
+    /// its first prompt read for the deny check.
+    pub fn set_never_hide(&mut self, rules: IgnoreRules) {
+        self.never_hide = rules;
+    }
+
+    /// Update whether observation is on (a config change). See
+    /// `observe_enabled`'s field doc for why this is load-bearing: without
+    /// it, a fresh install (no prompt rules) never reads a transcript head at
+    /// all, and observation would see nothing.
+    pub fn set_observe_enabled(&mut self, on: bool) {
+        self.observe_enabled = on;
+    }
+
+    /// Whether a first-prompt head-read is warranted for `id` right now: the
+    /// session exists, there's a reason to read it (a first-prompt ignore rule
+    /// to satisfy, or observation is on), it isn't already hidden by a
+    /// (cheaper) cwd rule, and either it has never been checked or is due a
+    /// retry. The caller does the bounded transcript read off-lock only when
+    /// this says so.
+    ///
+    /// `retry` matters: `SessionStart` is the first event carrying a
+    /// `transcript_path` and fires before any prompt is written, so the first
+    /// read reliably comes back empty. Once a prompt is resolved we stop asking.
+    pub fn first_prompt_due(&self, id: &str, retry: Duration) -> bool {
+        if !self.observe_enabled && !self.ignore.has_prompt_rules() {
+            return false;
+        }
+        match self.sessions.get(id) {
+            None => false,
+            Some(s) => {
+                if s.first_prompt.is_some() || self.ignore.cwd_hidden(&s.cwd) {
+                    return false;
+                }
+                match s.first_prompt_checked_at {
+                    None => true,
+                    Some(t) => t.elapsed() >= retry,
+                }
+            }
+        }
+    }
+
+    /// Record the result of a first-prompt head-read. Always stamps the attempt
+    /// time (so a fruitless read still debounces) but only latches a *value* when
+    /// one was found — a `None` read must stay retryable, or a session checked at
+    /// `SessionStart` could never be classified. Returns whether the session's
+    /// *hidden-ness* changed (worth a UI refresh — a newly-hidden session must
+    /// drop out of the widget and rollup). A no-op if the session is gone.
+    pub fn set_first_prompt(&mut self, id: &str, value: Option<String>) -> bool {
+        // Split-borrow the fields we need so `session_hidden` can read the
+        // rules while we mutate the session.
+        let Engine {
+            sessions,
+            ignore,
+            never_hide,
+            reveal_count,
+            ..
+        } = self;
+        match sessions.get_mut(id) {
+            None => false,
+            Some(s) => {
+                let was = session_hidden(ignore, never_hide, s);
+                if value.is_some() {
+                    s.first_prompt = value;
+                }
+                s.first_prompt_checked_at = Some(Instant::now());
+                let now_hidden = session_hidden(ignore, never_hide, s);
+                // A session that is *already* blocked must not be hidden by a
+                // late classification. `transition_to` guards the other
+                // direction (hidden, then blocked); this is the same valve at
+                // the other point where hidden-ness can flip — and it is the
+                // *normal* ordering for a first-prompt rule, since
+                // `SessionStart` fires before any prompt exists so
+                // classification is always deferred to a retry ≥5s later.
+                if now_hidden && !was && s.state == State::NeedsYou && !s.revealed {
+                    s.revealed = true;
+                    *reveal_count += 1;
+                    return false; // hidden-ness did not change: it stayed visible
+                }
+                now_hidden != was
+            }
+        }
+    }
+
+    /// Whether `id` is currently hidden by the ignore rules. Used to suppress
+    /// notifications for filtered sessions.
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.sessions
+            .get(id)
+            .is_some_and(|s| session_hidden(&self.ignore, &self.never_hide, s))
+    }
+
+    /// Number of tracked sessions currently hidden by the ignore rules — for
+    /// diagnostics/readback; the widget never sees these rows.
+    pub fn hidden_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| session_hidden(&self.ignore, &self.never_hide, s))
+            .count()
+    }
+
+    /// How many times the reveal-on-block safety valve has fired this run.
+    /// Diagnostic only, read by tests today; a later audit view surfaces it.
+    pub fn reveal_count(&self) -> u64 {
+        self.reveal_count
+    }
+
     /// Mark sessions stale past the timeout and drop them past the grace
     /// window. Reports whether anything changed and which sessions newly went
     /// stale (so the caller can optionally notify on idle).
@@ -708,6 +945,10 @@ impl Engine {
         let mut any_working = false;
         let mut any_ready = false;
         for s in self.sessions.values() {
+            // Filtered (headless/machine-spawned) sessions never colour the tray.
+            if session_hidden(&self.ignore, &self.never_hide, s) {
+                continue;
+            }
             if s.stale {
                 continue;
             }
@@ -726,37 +967,133 @@ impl Engine {
         }
     }
 
+    /// Build the serializable view of one session. Extracted from `snapshot`
+    /// (pure extraction, identical behaviour) so `preview_hidden_by` can reuse
+    /// it without duplicating the field mapping.
+    fn view_of(id: &str, s: &Session, now: Instant) -> SessionView {
+        let (folder, branch, worktree) = label_parts_worktree(&s.cwd);
+        SessionView {
+            session_id: id.to_string(),
+            label: combine_label(folder.clone(), branch.as_deref()),
+            folder,
+            branch,
+            worktree,
+            origin: origin_from_cwd(&s.cwd),
+            state: s.state,
+            stale: s.stale,
+            seconds_in_state: now.duration_since(s.state_since).as_secs(),
+            subagent_count: s.subagent_count,
+            subagent_seconds: s
+                .sub_since
+                .map(|t| now.duration_since(t).as_secs())
+                .unwrap_or(0),
+            can_focus: s.terminal_pid.is_some(),
+            descriptor: s.descriptor.clone(),
+        }
+    }
+
     /// A serializable snapshot of all sessions, newest-active first.
     pub fn snapshot(&self) -> Vec<SessionView> {
         let now = Instant::now();
+        let ignore = &self.ignore;
+        let never_hide = &self.never_hide;
         let mut views: Vec<SessionView> = self
             .sessions
             .iter()
-            .map(|(id, s)| {
-                let (folder, branch, worktree) = label_parts_worktree(&s.cwd);
-                SessionView {
-                    session_id: id.clone(),
-                    label: combine_label(folder.clone(), branch.as_deref()),
-                    folder,
-                    branch,
-                    worktree,
-                    state: s.state,
-                    stale: s.stale,
-                    seconds_in_state: now.duration_since(s.state_since).as_secs(),
-                    subagent_count: s.subagent_count,
-                    subagent_seconds: s
-                        .sub_since
-                        .map(|t| now.duration_since(t).as_secs())
-                        .unwrap_or(0),
-                    can_focus: s.terminal_pid.is_some(),
-                    descriptor: s.descriptor.clone(),
-                }
-            })
+            // Filtered (headless/machine-spawned) sessions never reach the widget.
+            .filter(|(_, s)| !session_hidden(ignore, never_hide, s))
+            .map(|(id, s)| Engine::view_of(id, s, now))
             .collect();
         // Stable, useful ordering: live before stale, then by label.
         views.sort_by(|a, b| a.stale.cmp(&b.stale).then_with(|| a.label.cmp(&b.label)));
         views
     }
+
+    /// Which currently-visible sessions would disappear if `matcher` were
+    /// appended to the ignore rules. Computed by re-running the real
+    /// `session_hidden` against a candidate rule set, so the preview can never
+    /// drift from the behaviour it predicts — including `never_hide`
+    /// precedence and the sticky `revealed` flag, both of which mean a session
+    /// matching the pattern may nonetheless *not* disappear. Never mutates the
+    /// engine's live rules.
+    pub fn preview_hidden_by(&self, matcher: crate::ignore::Matcher) -> Vec<SessionView> {
+        let now = Instant::now();
+        let candidate = self.ignore.with(matcher);
+        let mut views: Vec<SessionView> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| {
+                !session_hidden(&self.ignore, &self.never_hide, s)
+                    && session_hidden(&candidate, &self.never_hide, s)
+            })
+            .map(|(id, s)| Engine::view_of(id, s, now))
+            .collect();
+        views.sort_by(|a, b| a.label.cmp(&b.label));
+        views
+    }
+
+    /// Every currently-hidden session, with the rule hiding it. The verdict
+    /// comes from `session_hidden` (never a re-implementation); attribution
+    /// then re-runs the individual matchers to find which one fired.
+    pub fn hidden_audit(&self) -> Vec<HiddenSession> {
+        let now = Instant::now();
+        let mut out: Vec<HiddenSession> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| session_hidden(&self.ignore, &self.never_hide, s))
+            .filter_map(|(id, s)| {
+                attribute_rule(&self.ignore, s).map(|rule| HiddenSession {
+                    session: Engine::view_of(id, s, now),
+                    rule,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.session.label.cmp(&b.session.label));
+        out
+    }
+}
+
+/// One hidden session plus the rule responsible. Serialized to the settings
+/// audit view — PRD decision 5's shipped substitute for a cross-user
+/// precision claim.
+#[derive(Serialize, Clone, Debug)]
+pub struct HiddenSession {
+    pub session: SessionView,
+    /// The first matching rule, in `session_hidden`'s own evaluation order
+    /// (cwd before first-prompt). A session hidden by both a cwd rule and a
+    /// prompt rule reports the cwd rule — this is "the first matching rule",
+    /// not a claim that no other rule also matches.
+    pub rule: crate::ignore::Matcher,
+}
+
+/// Find the first matcher in `ignore` (declaration order, cwd kind evaluated
+/// before prompt kind — mirroring `session_hidden`) that fires against `s`.
+/// `None` only if `s` isn't actually hidden by `ignore` (callers only invoke
+/// this after `session_hidden` already returned true, so this is defensive).
+fn attribute_rule(ignore: &IgnoreRules, s: &Session) -> Option<crate::ignore::Matcher> {
+    use crate::ignore::Matcher;
+    ignore
+        .iter()
+        .find(|m| match m {
+            Matcher::CwdContains { value } => IgnoreRules::new(vec![Matcher::CwdContains {
+                value: value.clone(),
+            }])
+            .cwd_hidden(&s.cwd),
+            Matcher::FirstPromptPrefix { .. } => false,
+        })
+        .or_else(|| {
+            let first_prompt = s.first_prompt.as_deref()?;
+            ignore.iter().find(|m| match m {
+                Matcher::FirstPromptPrefix { value } => {
+                    IgnoreRules::new(vec![Matcher::FirstPromptPrefix {
+                        value: value.clone(),
+                    }])
+                    .prompt_hidden(first_prompt)
+                }
+                Matcher::CwdContains { .. } => false,
+            })
+        })
+        .cloned()
 }
 
 /// Tools that block on the user the instant they start and emit no
@@ -771,6 +1108,25 @@ impl Engine {
 /// canonical tool names.
 fn is_blocking_tool(tool_name: Option<&str>) -> bool {
     matches!(tool_name, Some("AskUserQuestion") | Some("ExitPlanMode"))
+}
+
+/// Whether a session is hidden: `never_hide` is checked first and outranks
+/// everything — fail open, since extra noise is recoverable but a hidden
+/// session you needed isn't. Otherwise, hidden if its cwd matches a cwd rule
+/// (A) or its cached first prompt matches a first-prompt rule (B). Free
+/// function (not a method) so callers can hold a `&mut` borrow of the session
+/// map and an `&` borrow of the rules at the same time.
+fn session_hidden(ignore: &IgnoreRules, never_hide: &IgnoreRules, s: &Session) -> bool {
+    if never_hide.matches(&s.cwd, s.first_prompt.as_deref()) {
+        return false;
+    }
+    if s.revealed {
+        return false;
+    }
+    ignore.cwd_hidden(&s.cwd)
+        || s.first_prompt
+            .as_deref()
+            .is_some_and(|p| ignore.prompt_hidden(p))
 }
 
 /// Repo facts derived from a working directory, used to build the session label
@@ -939,6 +1295,19 @@ fn worktree_repo_root(gitdir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn origin_flags_posix_cwd_as_remote_on_windows_only() {
+        if cfg!(target_os = "windows") {
+            // On a Windows host a POSIX cwd can only be a bridged VM/WSL session.
+            assert_eq!(origin_from_cwd("/home/me/project"), Origin::Remote);
+            assert_eq!(origin_from_cwd("/mnt/c/code/project"), Origin::Remote);
+            assert_eq!(origin_from_cwd(r"C:\Users\me\project"), Origin::Host);
+        } else {
+            // On a POSIX host we can't distinguish by path — never guess.
+            assert_eq!(origin_from_cwd("/home/me/project"), Origin::Host);
+        }
+    }
+
     fn ev(name: &str, sid: &str) -> HookEvent {
         HookEvent {
             hook_event_name: name.to_string(),
@@ -946,6 +1315,28 @@ mod tests {
             cwd: "/tmp/proj".to_string(),
             ..Default::default()
         }
+    }
+
+    /// An event with an explicit cwd — for the ignore-rule (hidden session) tests.
+    fn ev_cwd(name: &str, sid: &str, cwd: &str) -> HookEvent {
+        HookEvent {
+            cwd: cwd.to_string(),
+            ..ev(name, sid)
+        }
+    }
+
+    /// A user-configured rule set (the documented ECC recipe). Built explicitly
+    /// because `IgnoreRules::defaults()` is intentionally **empty** — the app
+    /// ships hiding nothing.
+    fn ignore_rules() -> IgnoreRules {
+        IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string(),
+            },
+            crate::ignore::Matcher::FirstPromptPrefix {
+                value: "IMPORTANT: You are running in non-interactive".to_string(),
+            },
+        ])
     }
 
     /// A subagent-emitted event: same `session_id` as the parent, but carrying an
@@ -1600,6 +1991,598 @@ mod tests {
         assert_eq!(e.snapshot().len(), 1, "stale session stays visible");
         assert!(e.snapshot()[0].stale, "and is marked stale (grey)");
         assert_eq!(e.rollup(), Rollup::Grey);
+    }
+
+    // --- Ignore rules: hide headless / machine-spawned sessions -------------
+
+    #[test]
+    fn headless_cwd_session_is_hidden_from_widget_and_rollup() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        // A real interactive session + an ECC headless session (cwd under the
+        // spawner scratch dir) working at the same time.
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "real",
+            "/home/me/Codes/whatsapp",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            r"C:\Users\me\.local\share\ecc-homunculus\projects\b4807c9eabf7",
+        ));
+        // Only the real one reaches the widget; the tray reflects only it.
+        let snap = e.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].session_id, "real");
+        assert_eq!(
+            e.rollup(),
+            Rollup::Orange,
+            "bot's Working must not colour tray"
+        );
+        // The bot is still tracked, just hidden.
+        assert!(e.is_hidden("bot"));
+        assert!(!e.is_hidden("real"));
+        assert_eq!(e.hidden_count(), 1);
+    }
+
+    /// A SHA-named directory must stay visible. `git worktree add ../<sha>` is a
+    /// real workflow (this app ships worktree-aware labels), and the removed
+    /// `folder_hex` matcher would have silently hidden it — while adding zero
+    /// coverage over `cwd_contains`.
+    #[test]
+    fn sha_named_worktree_is_not_hidden() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd("UserPromptSubmit", "wt", r"D:\tmp\b4807c9eabf7"));
+        assert_eq!(e.snapshot().len(), 1, "SHA-named worktree stays visible");
+        assert_eq!(e.rollup(), Rollup::Orange);
+        assert!(!e.is_hidden("wt"));
+    }
+
+    #[test]
+    fn first_prompt_rule_hides_after_read() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        // A non-hex, non-spawner cwd: cwd rules DON'T hide it...
+        e.apply(&ev_cwd("UserPromptSubmit", "p", "/home/me/work/project"));
+        assert_eq!(e.snapshot().len(), 1, "visible until first prompt is read");
+        // A first-prompt read is due (prompt rule exists, not yet checked, not
+        // cwd-hidden); once the headless note is recorded, it's hidden.
+        assert!(e.first_prompt_due("p", Duration::from_secs(0)));
+        let changed = e.set_first_prompt(
+            "p",
+            Some("IMPORTANT: You are running in non-interactive --print mode…".to_string()),
+        );
+        assert!(changed, "newly hidden → worth a refresh");
+        assert!(e.snapshot().is_empty());
+        assert!(
+            !e.first_prompt_due("p", Duration::from_secs(0)),
+            "prompt resolved → never due again"
+        );
+    }
+
+    /// The load-bearing fix: on a fresh install there are no ignore rules, so
+    /// without `observe_enabled` the transcript head is never read and
+    /// observation sees nothing. A cwd-hidden session still skips the read
+    /// either way (cheaper, and it has nothing to propose).
+    #[test]
+    fn first_prompt_due_requires_rules_or_observation() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev_cwd("UserPromptSubmit", "p", "/home/me/work/project"));
+        assert!(
+            !e.first_prompt_due("p", Duration::from_secs(0)),
+            "no rules, observation off → not due"
+        );
+
+        e.set_observe_enabled(true);
+        assert!(
+            e.first_prompt_due("p", Duration::from_secs(0)),
+            "observation on → due even with zero rules"
+        );
+
+        // A cwd-hidden session still isn't worth the read even with
+        // observation on — it has nothing to propose.
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(!e.first_prompt_due("bot", Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn ordinary_first_prompt_stays_visible() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd("UserPromptSubmit", "p", "/home/me/work/project"));
+        // A normal typed prompt (even one mentioning the phrase mid-sentence) is
+        // not the anchored prefix → stays visible.
+        let changed = e.set_first_prompt(
+            "p",
+            Some(
+                "why does IMPORTANT: You are running in non-interactive show in logs?".to_string(),
+            ),
+        );
+        assert!(!changed);
+        assert_eq!(e.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn first_prompt_not_due_when_cwd_already_hidden() {
+        // The cheap cwd rule already hides ECC sessions, so we never pay for the
+        // transcript head-read on them.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(e.is_hidden("bot"));
+        assert!(
+            !e.first_prompt_due("bot", Duration::from_secs(0)),
+            "cwd already hid it → no read"
+        );
+    }
+
+    /// Regression for the latch bug: the FIRST head-read happens at
+    /// `SessionStart`, before any prompt exists, so it returns `None`. A one-shot
+    /// "checked" flag latched there and the rule could never fire again for that
+    /// session. A fruitless read must stay retryable.
+    #[test]
+    fn none_first_prompt_read_is_retried() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd("SessionStart", "p", "/home/me/work/project"));
+
+        // SessionStart: due, but the transcript has no prompt yet.
+        assert!(e.first_prompt_due("p", Duration::from_secs(0)));
+        assert!(
+            !e.set_first_prompt("p", None),
+            "no value → no visible change"
+        );
+
+        // The bug: this used to be false forever. It must be due again.
+        assert!(
+            e.first_prompt_due("p", Duration::from_secs(0)),
+            "a None read must stay retryable"
+        );
+
+        // The retry finds the real prompt and the session is classified.
+        assert!(e.set_first_prompt(
+            "p",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string())
+        ));
+        assert!(e.is_hidden("p"));
+        // ...and now that it's resolved, we stop re-reading.
+        assert!(!e.first_prompt_due("p", Duration::from_secs(0)));
+    }
+
+    /// `never_hide` fails open: it always wins, whether it matches on cwd or
+    /// on the first prompt, and even when the same value also appears in the
+    /// deny-side `ignore_rules`.
+    #[test]
+    fn never_hide_outranks_ignore_rules() {
+        // cwd case: the same substring is both denied and allowlisted.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.set_never_hide(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string(),
+            },
+        ]));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(
+            !e.is_hidden("bot"),
+            "cwd allowlist outranks the cwd deny rule"
+        );
+        assert_eq!(e.hidden_count(), 0);
+
+        // prompt case: same anchored prefix in both lists.
+        let mut e2 = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e2.set_ignore_rules(ignore_rules());
+        e2.set_never_hide(IgnoreRules::new(vec![
+            crate::ignore::Matcher::FirstPromptPrefix {
+                value: "IMPORTANT: You are running in non-interactive".to_string(),
+            },
+        ]));
+        e2.apply(&ev_cwd("UserPromptSubmit", "p", "/home/me/work/project"));
+        e2.set_first_prompt(
+            "p",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        assert!(
+            !e2.is_hidden("p"),
+            "prompt allowlist outranks the prompt deny rule"
+        );
+        assert_eq!(e2.snapshot().len(), 1);
+    }
+
+    /// A hidden session that hits NeedsYou is a real block on the user — it
+    /// must not stay invisible. It reappears, colours the rollup red, and the
+    /// safety-valve counter increments.
+    #[test]
+    fn hidden_session_that_blocks_is_revealed() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(e.is_hidden("bot"), "premise: hidden by the cwd rule");
+        assert_eq!(e.reveal_count(), 0);
+
+        // A Notification carrying the *same* (still-hidden) cwd — using the
+        // generic `notif` helper here would overwrite it with `/tmp/proj`
+        // (an unrelated, non-hidden path) before the reveal check runs.
+        let out = e.apply(&HookEvent {
+            hook_event_name: "Notification".to_string(),
+            session_id: "bot".to_string(),
+            cwd: "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7".to_string(),
+            notification_type: Some("permission_prompt".to_string()),
+            ..Default::default()
+        });
+        assert!(
+            out.transition.is_some(),
+            "a revealed session's transition fires too"
+        );
+        assert!(!e.is_hidden("bot"));
+        assert_eq!(e.snapshot().len(), 1);
+        assert_eq!(e.rollup(), Rollup::Red);
+        assert_eq!(e.reveal_count(), 1);
+
+        // Stays visible through the rest of the lifecycle (sticky, not
+        // "visible while red").
+        e.apply(&tool_ev("PostToolUse", "bot", "AskUserQuestion"));
+        assert!(!e.is_hidden("bot"));
+        e.apply(&ev_cwd(
+            "Stop",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(!e.is_hidden("bot"), "sticky through Stop");
+
+        // A genuine restart re-hides it.
+        e.apply(&ev_cwd(
+            "SessionStart",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(e.is_hidden("bot"), "SessionStart clears the sticky reveal");
+    }
+
+    /// The counter stays at zero for the whole lifecycle of an ordinary
+    /// hidden session that never blocks — the premise-holds case.
+    #[test]
+    fn reveal_count_stays_zero_when_never_blocked() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        e.apply(&ev_cwd(
+            "Stop",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert_eq!(e.reveal_count(), 0);
+        assert!(e.is_hidden("bot"));
+    }
+
+    /// H1: `SessionStart` fires before any prompt exists, so a first-prompt
+    /// rule's classification is always deferred to a later retry. If that
+    /// session hits NeedsYou *before* the retry resolves, the late
+    /// classification must not hide it — the pre-fix tree hid it instead
+    /// (`is_hidden=true, snapshot_len=0, rollup=Grey, reveal_count=0`).
+    #[test]
+    fn session_blocked_before_classification_is_not_hidden() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        // No first_prompt yet, so the first-prompt rule can't hide it: the
+        // session reaches NeedsYou visible.
+        e.apply(&ev("UserPromptSubmit", "bot"));
+        e.apply(&notif("bot", "permission_prompt"));
+        assert!(
+            !e.is_hidden("bot"),
+            "premise: visible before classification"
+        );
+        assert_eq!(e.reveal_count(), 0);
+
+        // The deferred retry now resolves a first prompt matching the rule —
+        // the classification arrives late, after the block.
+        let changed = e.set_first_prompt(
+            "bot",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        assert!(!changed, "hidden-ness did not change: it stayed visible");
+        assert!(!e.is_hidden("bot"));
+        assert_eq!(e.snapshot().len(), 1);
+        assert_eq!(e.rollup(), Rollup::Red);
+        assert_eq!(e.reveal_count(), 1);
+    }
+
+    /// `preview_hidden_by` lists exactly the sessions that would newly
+    /// disappear: one matching, one already hidden by an existing rule
+    /// (already gone, not newly hidden), one unrelated.
+    #[test]
+    fn preview_lists_only_sessions_that_would_vanish() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "already-hidden".to_string(),
+            },
+        ]));
+        e.apply(&ev_cwd("SessionStart", "matching", "/tmp/proj-a"));
+        e.apply(&ev_cwd("SessionStart", "already", "/tmp/already-hidden"));
+        e.apply(&ev_cwd("SessionStart", "unrelated", "/tmp/proj-b"));
+
+        let preview = e.preview_hidden_by(crate::ignore::Matcher::CwdContains {
+            value: "proj-a".to_string(),
+        });
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].session_id, "matching");
+    }
+
+    /// A session matching the candidate pattern but allowlisted via
+    /// `never_hide`, and one already `revealed` (blocked while hidden),
+    /// must both be absent from the preview — the same fail-open rules
+    /// `session_hidden` enforces for real.
+    #[test]
+    fn preview_excludes_never_hide_and_revealed() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_never_hide(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "allowlisted".to_string(),
+            },
+        ]));
+        e.apply(&ev_cwd(
+            "SessionStart",
+            "allowlisted",
+            "/tmp/allowlisted-proj",
+        ));
+
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "revealed",
+            "/x/.local/share/ecc-homunculus/projects/deadbeef",
+        ));
+        // A Notification carrying the *same* (still-hidden) cwd — the generic
+        // `notif` helper would overwrite it with `/tmp/proj` (a visible path)
+        // before the reveal check runs, same reasoning as
+        // `hidden_session_that_blocks_is_revealed`.
+        e.apply(&HookEvent {
+            hook_event_name: "Notification".to_string(),
+            session_id: "revealed".to_string(),
+            cwd: "/x/.local/share/ecc-homunculus/projects/deadbeef".to_string(),
+            notification_type: Some("permission_prompt".to_string()),
+            ..Default::default()
+        });
+        assert!(!e.is_hidden("revealed"), "revealed sticks visible");
+
+        let preview = e.preview_hidden_by(crate::ignore::Matcher::CwdContains {
+            value: "proj".to_string(),
+        });
+        assert!(
+            preview.iter().all(|v| v.session_id != "allowlisted"),
+            "never_hide wins"
+        );
+        assert!(
+            preview.iter().all(|v| v.session_id != "revealed"),
+            "sticky reveal wins"
+        );
+    }
+
+    /// A preview call must never mutate the engine's live rules — the
+    /// candidate set is thrown away after the call.
+    #[test]
+    fn preview_does_not_mutate_engine_rules() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev_cwd("SessionStart", "a", "/tmp/proj-a"));
+        let before = e.hidden_count();
+        let _ = e.preview_hidden_by(crate::ignore::Matcher::CwdContains {
+            value: "proj-a".to_string(),
+        });
+        assert_eq!(e.hidden_count(), before);
+    }
+
+    /// `hidden_audit` lists every hidden session paired with the rule that
+    /// hid it — one hidden by a cwd rule, one hidden by a first-prompt rule,
+    /// one left visible.
+    #[test]
+    fn audit_lists_every_hidden_session_with_its_rule() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "cwd-hidden",
+            "/x/.local/share/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "prompt-hidden",
+            "/home/me/proj",
+        ));
+        e.set_first_prompt(
+            "prompt-hidden",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        e.apply(&ev_cwd("UserPromptSubmit", "visible", "/home/me/other"));
+
+        let audit = e.hidden_audit();
+        assert_eq!(audit.len(), 2, "only the two hidden sessions appear");
+        let cwd_entry = audit
+            .iter()
+            .find(|h| h.session.session_id == "cwd-hidden")
+            .expect("cwd-hidden session must appear in the audit");
+        assert_eq!(
+            cwd_entry.rule,
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string()
+            }
+        );
+        let prompt_entry = audit
+            .iter()
+            .find(|h| h.session.session_id == "prompt-hidden")
+            .expect("prompt-hidden session must appear in the audit");
+        assert_eq!(
+            prompt_entry.rule,
+            crate::ignore::Matcher::FirstPromptPrefix {
+                value: "IMPORTANT: You are running in non-interactive".to_string()
+            }
+        );
+        assert!(audit.iter().all(|h| h.session.session_id != "visible"));
+    }
+
+    /// A session matching both a cwd rule and a prompt rule reports the cwd
+    /// rule — `session_hidden`'s own evaluation order (A before B).
+    #[test]
+    fn audit_attributes_cwd_before_prompt_when_both_match() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "both",
+            "/x/.local/share/ecc-homunculus/projects/deadbeef",
+        ));
+        e.set_first_prompt(
+            "both",
+            Some("IMPORTANT: You are running in non-interactive --print mode".to_string()),
+        );
+        let audit = e.hidden_audit();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].rule,
+            crate::ignore::Matcher::CwdContains {
+                value: "ecc-homunculus".to_string()
+            },
+            "cwd rule reported even though the prompt rule also matches"
+        );
+    }
+
+    /// Mirrors `preview_excludes_never_hide_and_revealed`: an allowlisted
+    /// session and a sticky-revealed session must both be absent from the
+    /// audit, matching `snapshot()`'s own exclusions exactly.
+    #[test]
+    fn audit_excludes_never_hide_and_revealed() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_never_hide(IgnoreRules::new(vec![
+            crate::ignore::Matcher::CwdContains {
+                value: "allowlisted".to_string(),
+            },
+        ]));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "allowlisted",
+            "/x/.local/share/ecc-homunculus/projects/allowlisted",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "revealed",
+            "/x/.local/share/ecc-homunculus/projects/deadbeef",
+        ));
+        e.apply(&HookEvent {
+            hook_event_name: "Notification".to_string(),
+            session_id: "revealed".to_string(),
+            cwd: "/x/.local/share/ecc-homunculus/projects/deadbeef".to_string(),
+            notification_type: Some("permission_prompt".to_string()),
+            ..Default::default()
+        });
+        assert!(!e.is_hidden("revealed"), "premise: revealed sticks visible");
+
+        let audit = e.hidden_audit();
+        assert!(audit.iter().all(|h| h.session.session_id != "allowlisted"));
+        assert!(audit.iter().all(|h| h.session.session_id != "revealed"));
+    }
+
+    /// `hidden_audit().len()` must always agree with `hidden_count()` — the
+    /// audit is a superset-free enumeration of the same verdict.
+    #[test]
+    fn audit_len_equals_hidden_count() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot1",
+            "/x/.local/share/ecc-homunculus/projects/a",
+        ));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot2",
+            "/x/.local/share/ecc-homunculus/projects/b",
+        ));
+        e.apply(&ev_cwd("UserPromptSubmit", "visible", "/home/me/proj"));
+        assert_eq!(e.hidden_audit().len(), e.hidden_count());
+    }
+
+    /// A default engine (no rules) has an empty audit.
+    #[test]
+    fn audit_is_empty_with_no_rules() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/.local/share/ecc-homunculus/projects/a",
+        ));
+        assert!(e.hidden_audit().is_empty());
+    }
+
+    /// Declaration order survives the `IgnoreRules::iter()` accessor.
+    #[test]
+    fn ignore_rules_iter_yields_declaration_order() {
+        let rules = ignore_rules();
+        let kinds: Vec<&crate::ignore::Matcher> = rules.iter().collect();
+        assert_eq!(kinds.len(), 2);
+        assert!(matches!(
+            kinds[0],
+            crate::ignore::Matcher::CwdContains { .. }
+        ));
+        assert!(matches!(
+            kinds[1],
+            crate::ignore::Matcher::FirstPromptPrefix { .. }
+        ));
+    }
+
+    #[test]
+    fn no_rules_hide_nothing() {
+        // Default engine (no rules set) tracks and shows every session, including
+        // what would otherwise be a headless one.
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert_eq!(e.snapshot().len(), 1);
+        assert_eq!(e.rollup(), Rollup::Orange);
+        assert!(!e.is_hidden("bot"));
+    }
+
+    #[test]
+    fn clearing_rules_reveals_a_hidden_session() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.set_ignore_rules(ignore_rules());
+        e.apply(&ev_cwd(
+            "UserPromptSubmit",
+            "bot",
+            "/x/ecc-homunculus/projects/b4807c9eabf7",
+        ));
+        assert!(e.snapshot().is_empty());
+        // Rules are data: clearing them re-reveals the session immediately (no
+        // per-session recompute needed).
+        e.set_ignore_rules(IgnoreRules::default());
+        assert_eq!(e.snapshot().len(), 1);
+        assert_eq!(e.rollup(), Rollup::Orange);
     }
 
     // --- Added coverage: event→state derivation table, full rollup priority

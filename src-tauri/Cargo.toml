@@ -43,6 +43,10 @@ tiny_http = "0.12"
 png = "0.18"
 # OS CSPRNG for the listener auth token (32 random bytes → hex).
 getrandom = "0.4"
+# Fingerprinting observed prompt openings (salted hash, never plaintext).
+# Already compiled transitively via Tauri (Cargo.lock), so this adds no new
+# build cost or licence entry.
+sha2 = "0.10"
 
 # --- Click-to-focus terminal (raise a window by its owning PID) ---
 # macOS: NSRunningApplication.activate / NSWorkspace.frontmostApplication. This

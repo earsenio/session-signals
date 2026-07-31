@@ -23,6 +23,32 @@ pub const DEFAULT_STALE_MIN: u64 = 10;
 /// rather than blink out, short enough to eventually clear a dead session whose
 /// terminal never fired `SessionEnd`.
 pub const DEFAULT_IDLE_DROP_MIN: u64 = 60;
+/// Days an observation record survives before `prune` drops it.
+pub const DEFAULT_OBSERVE_RETAIN_DAYS: u64 = 30;
+/// Default minimum cluster size before an observed opening is offered as a
+/// filter proposal.
+pub const DEFAULT_PROPOSE_THRESHOLD: u32 = 3;
+/// Floor for `propose_threshold`, enforced in [`Config::sanitized`] and
+/// re-enforced in `proposals::build` — measured leakage on the research
+/// corpus was 26 human patterns at 1, 3 at 2, and 0 at 3.
+pub const MIN_PROPOSE_THRESHOLD: u32 = 3;
+/// Minimum sample length (chars) a cluster's `sample` must reach before it's
+/// proposal-eligible — enforced in `proposals::build`. PRD decision 6,
+/// measured, not invented: the Phase 6 prefix-discrimination sweep over a
+/// real local `~/.claude/projects` corpus (756 transcripts, 568 resolved
+/// first prompts) found mixed human/machine clusters at short hypothetical
+/// prefix lengths (peak: 5 mixed clusters at 8 chars) but **zero** from 57
+/// chars onward, stably across the entire remaining swept range (57–120).
+/// This floor matches `observe::PREFIX_LENS`'s existing shortest tracked
+/// length (60) — already past the measured knee — so it also closes the one
+/// real gap: a naturally-short prompt (< 60 chars) is sampled at its own
+/// length with no floor at all (see `observe::sample`'s doc), and was
+/// therefore the only path by which an unfloored short sample could reach a
+/// proposal. See the "Minimum sample length" section of
+/// `docs/IGNORING_BOT_SPAWNED_SESSIONS.md` for the sweep table and, importantly,
+/// what it does not establish: `mixed` cannot see two *unmarked* openings
+/// colliding, which is the case this floor actually guards.
+pub const MIN_PROPOSE_SAMPLE_LEN: usize = 60;
 
 /// Built-in notification sounds (macOS system sound names under
 /// `/System/Library/Sounds`). The settings UI offers this set.
@@ -80,6 +106,55 @@ pub struct Config {
     pub needs_you: StateNotify,
     pub working: StateNotify,
     pub ready: StateNotify,
+    /// Rules that hide non-interactive / machine-spawned sessions (e.g. headless
+    /// `claude --print` agents launched by third-party tooling) from the widget
+    /// and tray rollup.
+    ///
+    /// **Empty by default** — Session Signals hides nothing until you ask it to.
+    /// See `docs/IGNORING_BOT_SPAWNED_SESSIONS.md` for ready-made patterns. Deserialized leniently
+    /// so a rule kind from a newer/older build is dropped rather than aborting the
+    /// whole config parse (which would reset every unrelated setting).
+    #[serde(default, deserialize_with = "crate::ignore::deserialize_lenient")]
+    pub ignore_rules: Vec<crate::ignore::Matcher>,
+    /// Openings the user has declared their own — outranks `ignore_rules` and
+    /// is never observed (see `observe.rs`). **Empty by default**, same
+    /// rationale as `ignore_rules`: no shipped pattern names a specific tool.
+    /// Same lenient deserializer: an unrecognized matcher kind is dropped
+    /// rather than aborting the whole config parse.
+    #[serde(default, deserialize_with = "crate::ignore::deserialize_lenient")]
+    pub never_hide: Vec<crate::ignore::Matcher>,
+    /// User-configured additions to the built-in marker registry
+    /// (`markers::BUILTIN_HUMAN`). **Additive only** — an entry colliding
+    /// with a built-in prefix is dropped (see `markers::Registry::new`).
+    /// Ordinary `#[serde(default)]`, not the lenient deserializer: this is a
+    /// plain struct shape, not a tagged enum, so an unparseable entry is a
+    /// genuine config error.
+    #[serde(default)]
+    pub markers: Vec<crate::markers::MarkerRule>,
+    /// Whether Session Signals reads session openings to look for repeating
+    /// patterns (salted-hash counts only — see `observe.rs`). On by default:
+    /// the eventual filter-proposal surface presumes observation runs.
+    #[serde(default = "default_observe_enabled")]
+    pub observe_enabled: bool,
+    /// Days an observation record is kept before being pruned. `0` sanitizes
+    /// to [`DEFAULT_OBSERVE_RETAIN_DAYS`] — there's no "never" here.
+    #[serde(default)]
+    pub observe_retain_days: u64,
+    /// Minimum cluster size before an observed opening is offered as a
+    /// filter proposal. **Floored at [`MIN_PROPOSE_THRESHOLD`] in
+    /// `sanitized()`, not in the UI** — measured leakage on the research
+    /// corpus was 26 human patterns at 1, 3 at 2, and 0 at 3, and a UI-only
+    /// default is bypassable by hand-editing this file.
+    #[serde(default = "default_propose_threshold")]
+    pub propose_threshold: u32,
+}
+
+fn default_observe_enabled() -> bool {
+    true
+}
+
+fn default_propose_threshold() -> u32 {
+    DEFAULT_PROPOSE_THRESHOLD
 }
 
 impl Default for Config {
@@ -97,6 +172,12 @@ impl Default for Config {
             needs_you: StateNotify::new(true, "Ping"),
             working: StateNotify::new(false, "Pop"),
             ready: StateNotify::new(false, "Glass"),
+            ignore_rules: crate::ignore::IgnoreRules::defaults(),
+            never_hide: Vec::new(),
+            markers: Vec::new(),
+            observe_enabled: true,
+            observe_retain_days: DEFAULT_OBSERVE_RETAIN_DAYS,
+            propose_threshold: DEFAULT_PROPOSE_THRESHOLD,
         }
     }
 }
@@ -119,6 +200,12 @@ impl Config {
         }
         if self.theme.trim().is_empty() {
             self.theme = "classic".to_string();
+        }
+        if self.observe_retain_days == 0 {
+            self.observe_retain_days = DEFAULT_OBSERVE_RETAIN_DAYS;
+        }
+        if self.propose_threshold < MIN_PROPOSE_THRESHOLD {
+            self.propose_threshold = MIN_PROPOSE_THRESHOLD;
         }
         self.version = CURRENT_VERSION;
         self
@@ -143,4 +230,60 @@ pub fn save(app: &AppHandle, cfg: &Config) -> Result<(), String> {
     let v = serde_json::to_value(cfg).map_err(|e| e.to_string())?;
     store.set(CONFIG_KEY, v);
     store.save().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A config written by a build that predates this plan (no `never_hide`,
+    /// `markers`, `observe_enabled`, `observe_retain_days` keys) must still
+    /// load, with the new fields filling in from their defaults rather than
+    /// aborting the whole parse.
+    #[test]
+    fn existing_config_json_loads_with_new_defaults() {
+        let json = serde_json::json!({
+            "version": 1,
+            "port": 4317,
+            "stale_timeout_min": 10,
+            "idle_drop_min": 60,
+            "launch_on_login": false,
+            "notify_idle": false,
+            "notify_unfocused_only": true,
+            "theme": "classic",
+            "needs_you": { "enabled": true, "sound": false, "sound_name": "Ping" },
+            "working": { "enabled": false, "sound": false, "sound_name": "Pop" },
+            "ready": { "enabled": false, "sound": false, "sound_name": "Glass" },
+            "ignore_rules": []
+        });
+        let cfg: Config = serde_json::from_value(json).expect("old config must still parse");
+        let cfg = cfg.sanitized();
+        assert!(cfg.never_hide.is_empty());
+        assert!(cfg.markers.is_empty());
+        assert!(cfg.observe_enabled);
+        assert_eq!(cfg.observe_retain_days, DEFAULT_OBSERVE_RETAIN_DAYS);
+        assert_eq!(cfg.propose_threshold, DEFAULT_PROPOSE_THRESHOLD);
+    }
+
+    #[test]
+    fn zero_observe_retain_days_sanitizes_to_default() {
+        let mut cfg = Config {
+            observe_retain_days: 0,
+            ..Config::default()
+        };
+        cfg = cfg.sanitized();
+        assert_eq!(cfg.observe_retain_days, DEFAULT_OBSERVE_RETAIN_DAYS);
+    }
+
+    #[test]
+    fn propose_threshold_below_floor_is_clamped() {
+        for (input, expected) in [(0, 3), (1, 3), (5, 5)] {
+            let cfg = Config {
+                propose_threshold: input,
+                ..Config::default()
+            }
+            .sanitized();
+            assert_eq!(cfg.propose_threshold, expected, "input {input}");
+        }
+    }
 }

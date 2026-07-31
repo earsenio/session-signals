@@ -73,14 +73,20 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
   multi-monitor aware.
 - One row per session: status dot • label • state text • time-in-state.
 - Compact mode (dots only) vs expanded (full rows); opacity control; show/hide.
-- **v1 is display-only.** "Click a row to focus that terminal" is deferred —
-  reliable cross-platform terminal focusing is fiddly and out of scope for v1.
+- Clicking a row focuses that session's terminal tab, via a tty captured at
+  session start (shipped in 0.2.0; originally deferred past v1).
+- Rows carry a per-session descriptor (Claude Code's session title, else the
+  latest prompt) and a "N agents running" sub-line when subagents are active.
+- Sessions hidden by a filter rule (§5.7) never appear in the list.
 
 ### 5.4 Notifications
 - Per-state toggles; sound on/off per state.
 - Fire on state **transitions** only, never repeatedly while idle.
 - Defaults: Red on (no sound); Orange/Green off.
-- Later (not v1): "only notify if that terminal isn't focused."
+- Focus-aware: suppress a notification when that session's terminal is already
+  focused (shipped in 0.2.0; originally deferred past v1).
+- A filtered-out session (§5.7) never notifies — unless it blocks on you, which
+  reveals it first.
 
 ### 5.5 Hook setup
 - One-time installer writes the HTTP hook block into `~/.claude/settings.json`,
@@ -92,6 +98,73 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
 - A theme = an icon set + a state→appearance map, defined as data.
 - Switching themes requires no code change. Ship at least two (classic traffic
   light + one alternate).
+
+### 5.7 Session filtering
+
+Background tooling launches Claude Code headlessly (`claude --print`). Those runs
+carry a normal `session_id` and no `agent_id`, so they are indistinguishable from
+the user's own sessions and flood both surfaces. Filtering is the answer — and it
+is **opt-in and reversible**, because a session that silently disappears is the
+worst failure this app has.
+
+**Rules.** Two data-driven matcher kinds, both case-insensitive:
+`first_prompt_prefix` (anchored to the session's **opening** prompt, so merely
+mentioning a phrase later never hides you) and `cwd_contains`. They live in
+`config.ignore_rules`. **Ships empty — nothing is hidden until the user opts in.**
+
+**Precedence, failing open.** `config.never_hide` uses the same two matcher
+shapes but inverts the outcome: a `never_hide` match keeps a session visible
+regardless of `ignore_rules`. A session matching both stays **visible**. Extra
+noise is recoverable; a session you needed that vanished isn't.
+
+**Built-in human markers.** An opening preceded by a Claude Code interaction
+marker — `<command-…>`, `<local-command-…>`, `<ide_opened_file>`,
+`<ide_selection>` — is never matched, never observed, and never proposed. Those
+are evidence of a human at the keyboard. They are immutable by design.
+
+**Reveal-on-block (safety valve).** A session hidden by `ignore_rules` that hits
+a real block on the user — a permission prompt, a plan to approve — is un-hidden
+until it restarts, notifies normally, and colours the tray. A filter is a guess;
+a guess must never swallow a request for the user specifically. `SessionStart`
+clears the reveal. `never_hide` is unaffected (it was never hidden).
+
+**Observation (privacy-constrained).** With `observe_enabled` (default on), the
+app reads each session's first prompt once and records a **salted hash** of it —
+128-bit fingerprints at a few prefix lengths, a count, and first/last-seen
+timestamps. **Never the prompt text.** Records prune after `observe_retain_days`
+(default 30). Stated limitation: hashing a short, low-entropy prompt is not
+anonymity against a dictionary attack; what it defeats is a readable prompt log
+sitting in JSON that could be synced, backed up, or attached to a bug report.
+
+**Proposals.** An opening seen at least `propose_threshold` times (default 3,
+floored at 3 in code) becomes a suggested rule, offered one card at a time with
+its sample text and the live sessions that would disappear on accept. Three
+explicit actions, none automatic: **accept** (writes the `ignore_rules` entry,
+idempotent), **dismiss** (this run; returns if the cluster grows), **never
+suggest** (writes `never_hide` and purges the related fingerprints). A proposal
+left alone changes nothing.
+
+**Measured threshold.** A cluster's sample must be ≥ 60 characters to be
+proposal-eligible (`config::MIN_PROPOSE_SAMPLE_LEN`). This is measured, not
+guessed: a sweep over a 568-prompt local corpus found human/machine openings
+colliding at short prefix lengths (peaking at ~a fifth of clusters at 8 chars),
+dropping to zero from 57 characters onward. Method,
+table, and caveats:
+[IGNORING_BOT_SPAWNED_SESSIONS.md](IGNORING_BOT_SPAWNED_SESSIONS.md#minimum-sample-length--and-what-its-based-on).
+
+**Surfaces.** Settings → **Session filtering** hosts both rule editors, the
+read-only built-in markers, the proposal card, and an audit list of every
+currently-hidden session *paired with the rule hiding it* plus the
+reveal-on-block count — that audit is what makes the tray colour verifiable.
+Discovery is a quiet tray line ("Session filtering: N suggestion…") that opens
+Settings; it **never** changes the tray icon or colour, which encode rollup
+state only.
+
+**Behaviour of hidden sessions.** Still tracked — they simply never reach the
+widget list, never colour the tray, and never notify. Remove the rule and they
+reappear immediately; no state is lost.
+
+Full user-facing guide: [IGNORING_BOT_SPAWNED_SESSIONS.md](IGNORING_BOT_SPAWNED_SESSIONS.md).
 
 ## 6. Non-functional requirements
 
@@ -129,13 +202,40 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
 - A session marked stale clears its subagent count, so a greyed "No response"
   row never keeps asserting "N agents running" (the matching `SubagentStop` may
   never have arrived before it went silent).
+- A prompt sent as content blocks rather than a plain string must still resolve
+  — a string-only reader silently blanks the opening prompt for a large share of
+  sessions, disabling every `first_prompt_prefix` rule for them.
+- The first-prompt read happens at `SessionStart`, before any prompt exists, so
+  an empty result must be re-checked rather than latched permanently.
+- A session that hits a permission prompt *before* its opening prompt is
+  classified must stay visible — a late classification arriving after the block
+  must not hide a session that is genuinely waiting on the user.
+- `AskUserQuestion` / `ExitPlanMode` block on the user the moment they fire but
+  emit no `Notification` the listener can see, so the engine escalates to
+  Needs you on their `PreToolUse` and returns to Working once answered.
+- An `ignore_rules` cluster that crossed the propose threshold entirely in a
+  previous run surfaces only after one more matching session re-supplies the
+  sample text — the count persists, the readable sample deliberately does not.
 
-## 8. Open / deferred (not v1)
+## 8. Open / deferred
 
-- Click-to-focus terminal.
-- Focus-aware notifications.
-- Shared-token auth on the listener.
+Shipped since this list was first written: click-to-focus terminal, focus-aware
+notifications, and shared-token auth on the listener (all 0.2.0).
+
+Still open:
+
 - Auto-update.
+- Signed installers — CI builds are unsigned, so macOS Gatekeeper and Windows
+  SmartScreen warn on first launch. See [VERSIONING.md](VERSIONING.md).
+- A cross-user corpus for the §5.7 prefix measurement. The 57-character knee
+  comes from a single developer's local tree; it cannot measure the
+  same-polarity case (a user's own unmarked opening colliding with an unmarked
+  machine one). See
+  [IGNORING_BOT_SPAWNED_SESSIONS.md](IGNORING_BOT_SPAWNED_SESSIONS.md#minimum-sample-length--and-what-its-based-on).
+- A confirmed fast path for the first prompt. No wired hook payload carries it
+  within the currently-verified schema, so the transcript-head read stays
+  load-bearing; `UserPromptSubmit`'s documented `prompt` field is an unverified
+  candidate that has never been captured live against this repo's listener.
 
 ## 9. Phasing
 
@@ -146,4 +246,9 @@ Claude Code session ──(hooks, async HTTP POST)──▶ 127.0.0.1:4317/hook
 | 3 — Notifications | Settings surface + configurable per-state notifications. |
 | 4 — Themes | Data-driven themes + packaging/installers + polish. |
 
-Each phase ends runnable and demoable.
+Each phase ends runnable and demoable. All four are complete.
+
+**Session filtering** (§5.7) was built afterwards as its own six-phase effort —
+foundation fixes, observation store, marker registry + allowlist, clustering +
+proposals, settings UI, and fixtures + validation. All six are complete; phases
+1–4 are committed and 5–6 are pending commit on `feat/headless-session-filter`.

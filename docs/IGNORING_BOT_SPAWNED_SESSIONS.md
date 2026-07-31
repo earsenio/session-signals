@@ -1,0 +1,282 @@
+# Ignoring machine-spawned sessions
+
+Some tooling launches Claude Code in headless mode (`claude --print`) in the
+background. Those runs are real sessions — they carry a normal `session_id` and
+no `agent_id`, so Session Signals cannot tell them apart from your own work and
+shows them as ordinary rows. If you run such tooling, the widget fills with
+sessions you never started and the tray colours for work you aren't doing.
+
+`ignore_rules` lets you hide them.
+
+> **Session Signals ships with no ignore rules at all.** Nothing is hidden until
+> you add a rule. A session that silently disappears is the worst thing this app
+> can do — it exists to make sure you don't miss one — so filtering is always
+> opt-in, and the patterns below name specific third-party tools that most users
+> don't run.
+
+## Where the rules live
+
+In the Session Signals store (`beacon.json` in the app config dir), under
+`config.ignore_rules`.
+
+## Managing rules in Settings
+
+Everything on this page is also reachable from **Settings → Session
+filtering**, without hand-editing `beacon.json`:
+
+- **Hide these sessions** — an editable list of `ignore_rules`. Add a rule,
+  pick its kind (`first prompt starts` / `cwd contains`), type the value.
+  Changes save automatically (debounced while typing).
+- **Never hide these** — the `never_hide` list, editable the same way. The
+  section states the precedence in the UI, not just here: **`never_hide`
+  always wins** — a session matching both lists stays visible.
+- **Always treated as yours (built in)** — the four Claude Code interaction
+  markers (`<command-…>`, `<local-command-…>`, `<ide_opened_file>`,
+  `<ide_selection>`) that are never observed or proposed. Shown greyed, with
+  no delete affordance — they're immutable by design (see "What Session
+  Signals records" below).
+- **Hidden right now** — an audit list of every currently-hidden session
+  paired with the rule that's hiding it, plus the reveal-on-block count. This
+  is what makes the tray colour verifiable: it always matches exactly what
+  the widget is *not* showing.
+- **The suggested-filter card** — see "Suggested filters" below; it's the
+  same `list_proposals`/`accept_proposal`/`dismiss_proposal`/
+  `never_suggest_proposal` flow, rendered as one card at a time.
+- A quiet tray line ("Session filtering: N suggestion…") appears only when a
+  proposal is waiting and opens Settings scrolled to this section when
+  clicked — it never changes the tray icon or colour, which always encodes
+  rollup state only.
+
+One caveat the UI can't work around: accepting a `never_hide` entry (or
+writing one by hand) only keeps *new* observations out of the store —
+fingerprints already recorded before the entry existed remain (hashes are
+one-way, so there's no reversing one back to text to purge it after the
+fact). The **Clear observations** button in this section is the full reset if
+you want to be sure nothing from before is still counted.
+
+## Rule kinds
+
+### `first_prompt_prefix` — match the session's opening prompt
+
+```jsonc
+{ "kind": "first_prompt_prefix", "value": "IMPORTANT: You are running in non-interactive" }
+```
+
+Hides a session whose **first** prompt starts with this text (case-insensitive,
+leading whitespace ignored). This is the reliable one: a spawner injects a fixed
+instruction, and that opening identifies it.
+
+It is deliberately **anchored to the first prompt**, so a session where *you*
+merely mention the phrase later is never hidden.
+
+Sessions that open with one of Claude Code's own interaction markers —
+`<command-…>`, `<local-command-…>`, `<ide_opened_file>`, `<ide_selection>` — are
+never matched. Those mean a human typed a slash command or opened a file, so a
+long autonomous run you started with `/some-command` stays visible.
+
+### `cwd_contains` — match the working directory
+
+```jsonc
+{ "kind": "cwd_contains", "value": "ecc-homunculus" }
+```
+
+Hides a session whose working directory contains this substring
+(case-insensitive). Convenient when a spawner uses its own scratch directory.
+
+**Use with care.** A directory rule cannot separate machine sessions from your
+own when both run in the same folder — which is common, since background tooling
+often analyses the repo you're working in. Prefer `first_prompt_prefix`.
+
+## Keeping your own openings out (`never_hide`)
+
+Session Signals also **observes** which session openings repeat, so it can
+eventually offer you a ready-made `first_prompt_prefix`/`cwd_contains` rule
+built from a pattern it actually saw — instead of you having to write one by
+hand from the recipe below. `never_hide` is how you keep specific openings of
+your own out of that observation entirely, and — **`never_hide` always
+wins** — out of `ignore_rules` too, even if a rule would otherwise hide them.
+
+```jsonc
+"never_hide": [
+  { "kind": "first_prompt_prefix", "value": "please review the listener" },
+  { "kind": "cwd_contains", "value": "my-personal-scratch-repo" }
+]
+```
+
+Same two matcher shapes as `ignore_rules`, same precedence logic — but
+inverted: a `never_hide` match makes a session visible (or keeps it visible)
+regardless of what `ignore_rules` says about the same cwd or prompt. If a
+prefix appears in both lists, the session stays **visible**. This fails open
+on purpose: extra noise in the widget is recoverable, a session you needed
+that silently vanished isn't.
+
+### What Session Signals records
+
+With observation on (`observe_enabled`, on by default), Session Signals reads
+each session's first prompt once and stores a **salted hash** of its opening —
+never the prompt text itself. Concretely, per distinct opening: a few
+128-bit fingerprints (one per tracked prefix length), a count, and first/last-seen
+timestamps. Records older than `observe_retain_days` (30 by default) are
+pruned automatically. `grep`-ing `beacon.json` for anything you typed will
+never find it.
+
+Honest limitation: hashing a short, low-entropy prompt is not anonymity
+against someone who can hash a dictionary of candidate strings. What it
+defeats is a readable prompt log sitting in JSON that could get synced,
+backed up, or attached to a bug report.
+
+An opening a human marker precedes — a slash command, `<ide_opened_file>`,
+`<ide_selection>` — is never observed either, on the same reasoning as the
+`ignore_rules` anchoring above: those are evidence of you at the keyboard, not
+a repeatable machine pattern.
+
+Set `observe_enabled: false` to turn observation off entirely; existing
+records are left alone until you clear them.
+
+### A hidden session that blocks on you always reappears
+
+If a session hidden by `ignore_rules` ever needs you — a permission prompt, a
+plan to approve — it is un-hidden **until it restarts**, notifies like any
+other session, and colours the tray red. This is a safety valve, not a bug:
+a filter is a guess about what's machine-spawned, and a guess should never be
+allowed to swallow a request for you specifically. A genuine restart
+(`SessionStart`) clears the reveal, so the rule applies normally again from
+the next run.
+
+## Suggested filters
+
+Instead of writing a rule by hand, Session Signals can offer you one built from
+a pattern it actually observed. `list_proposals` returns every eligible
+cluster — an opening seen at least `propose_threshold` times (3 by default,
+floored at 3 in code) — highest count first, each with its readable sample
+text and the currently-visible sessions that would disappear on accept.
+
+Three actions, none of them automatic:
+
+- **Accept** (`accept_proposal`) — writes the sample as a `first_prompt_prefix`
+  entry in `ignore_rules`. Idempotent: accepting twice writes one rule.
+- **Dismiss** (`dismiss_proposal`) — "not now," this run only. The proposal
+  reappears once the cluster grows past its count at dismissal.
+- **Never suggest** (`never_suggest_proposal`) — adds the sample to
+  `never_hide` *and* purges every fingerprint whose live sample is
+  prefix-related to it from the observation store, so it stops surfacing
+  again this run. A record with no live sample (carried over from a previous
+  run) can't be matched to that family and may still exist on disk — hashes
+  are one-way, so a purge can never be total across a restart.
+  `clear_observations` is the full reset if you want one.
+
+Nothing is applied without one of these three actions — a proposal sitting
+unaddressed changes nothing.
+
+### Minimum sample length — and what it's based on
+
+A cluster's sample must be at least **60 characters** to be proposal-eligible
+(`config::MIN_PROPOSE_SAMPLE_LEN`). That number is measured, not guessed.
+
+**How it was measured.** A sweep (`src-tauri/tests/prefix_sweep.rs`, `#[ignore]`d
+by default) walked a local `~/.claude/projects`-shaped tree, resolving each
+session's opening through the same `descriptor::first_prompt` the app uses. For
+every hypothetical prefix length from 4 to 120 it grouped openings by
+fingerprint and counted the **mixed** clusters — groups containing both a
+human-marked and an unmarked opening, i.e. the case where a prefix has stopped
+telling your sessions apart from a machine's.
+
+Run 2026-07-30: **756** transcripts walked, **568** resolved an opening (21
+human-marked, 547 unmarked); 9 of the 568 (~1.6%) are naturally under 60
+characters.
+
+| prefix length | clusters | mixed |
+|----:|---------:|------:|
+| 4–6 | 7 | 1 |
+| 8 | 13 | **5 (peak)** |
+| 9–17 | 10–12 | 4 |
+| 18–25 | 9–10 | 2–3 |
+| 26–56 | 9–10 | 1 |
+| **57–120** | 8 | **0** |
+
+Mixed clusters occur at every length from 4 through 56, peaking at 8 characters
+(where a fifth of all clusters mixed polarities), then drop to zero at 57 and
+stay there for the entire remaining range — 64 consecutive lengths. 60 is the
+shortest length Session Signals already tracks for longer prompts, so adopting
+it as the floor sits safely past that knee without introducing a second,
+unrelated constant. It closes the one real gap: a naturally-short prompt is
+otherwise sampled at its own length with no floor at all.
+
+**What this does not establish.** The `mixed` metric counts clusters mixing a
+*marked* human opening with an unmarked one — but marked openings are never
+observed in the first place, so they can never form a real cluster at any
+length; the sweep sees them only because it runs outside that guard. The risk
+this floor actually exists to reduce — **your own unmarked opening repeating
+and colliding with a machine's** — is by construction invisible to `mixed`, because
+two unmarked openings colliding is a homogeneous cluster, not a mixed one. The
+knee is real evidence that mixed-polarity collisions stop at 57 characters; it
+is not evidence about same-polarity collisions. It is also a single-developer
+local corpus, not a cross-user sample.
+
+One consequence that is **not** measured: a spawner whose injected opening is
+itself under 60 characters can never be proposed, at any cluster size. Both
+known ECC families are long, so there's no observed recall cost — but that's an
+assumption this corpus doesn't test, not a verified property.
+
+The raw record (full per-length table, method, and both Phase 6 measurements)
+is kept with the project's internal notes rather than published here; the sweep
+itself is reproducible with
+`BEACON_CORPUS=<path> cargo test --test prefix_sweep -- --ignored --nocapture`.
+
+Two honest caveats:
+
+- **A cluster that crossed the threshold entirely in a previous run
+  surfaces only after one more matching session re-supplies the sample
+  text.** The count is persisted; the readable sample is not (see "What
+  Session Signals records" above). This is a delay, not a loss — the
+  alternative was persisting plaintext.
+- **The preview list (`matching`) can be shorter than `count`.** `count`
+  groups on the whitespace-normalized opening; the rule a proposal writes is
+  a literal prefix, and only sessions live *right now* can appear in the
+  preview. Seeing fewer rows than the count is expected, not a bug.
+
+## Recipe: ECC (`continuous-learning` / homunculus observer)
+
+The [ECC plugin](https://github.com/affaan-m/ECC) spawns `claude -p` for two
+background jobs. Both use fixed openings, so one rule each is enough:
+
+```jsonc
+"ignore_rules": [
+  { "kind": "first_prompt_prefix", "value": "IMPORTANT: You are running in non-interactive" },
+  { "kind": "first_prompt_prefix", "value": "Below is a conversation log from a Claude Code" }
+]
+```
+
+Source of those strings, if you want to verify them against your installed
+version:
+
+- `skills/continuous-learning-v2/agents/observer-loop.sh` — the instinct observer
+- `scripts/lib/llm-summary.js` — the session summariser (calls `claude -p` directly)
+
+Optionally add the scratch directory, which also catches observer runs before
+their first prompt is written:
+
+```jsonc
+{ "kind": "cwd_contains", "value": "ecc-homunculus" }
+```
+
+## Writing a rule for other tooling
+
+1. Find the session in `~/.claude/projects/<project>/<session-id>.jsonl`.
+2. Read its first `user` (or `queue-operation`) record — that's the opening prompt.
+3. Take a distinctive **leading** fragment, long enough not to collide with
+   anything you'd type yourself.
+4. Add it as a `first_prompt_prefix` rule.
+
+Prefer a longer prefix over a shorter one. `"IMPORTANT:"` alone would hide any
+session that happens to begin that way, including yours.
+
+## Behaviour of hidden sessions
+
+Hidden sessions are still tracked — they simply never reach the widget list, never
+colour the tray, and never raise a notification. Remove the rule and they reappear
+immediately; no state is lost.
+
+## Turning it off
+
+Set `ignore_rules` to `[]`. That is also the shipped default.

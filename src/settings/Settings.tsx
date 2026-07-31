@@ -8,6 +8,7 @@ import { useTheme } from "../themes/useTheme";
 import { THEME_LIST, type ThemePalette } from "../themes";
 import { StateGlyph } from "../components/StateGlyph";
 import { shapeForState } from "../components/glyphShape";
+import SessionFiltering from "./SessionFiltering";
 import "./Settings.css";
 
 type StateKey = "needs_you" | "working" | "ready";
@@ -30,6 +31,7 @@ export default function Settings() {
   const [appVersion, setAppVersion] = useState("");
   const [widgetOpacity, setWidgetOpacity] = useState(0.95);
   const flashTimer = useRef<number | undefined>(undefined);
+  const filterSectionRef = useRef<HTMLDivElement>(null);
 
   const flash = useCallback((msg: string, kind: "ok" | "err") => {
     setStatus({ msg, kind });
@@ -83,6 +85,43 @@ export default function Settings() {
       void unlisten.then((un) => un());
     };
   }, [flash, refreshHooks]);
+
+  // `set_config` runs `sanitized()` server-side, which can clamp a value
+  // (e.g. `propose_threshold` below 3) — without this, the window would keep
+  // showing the pre-clamp number until it's reopened (review finding M5).
+  // `useConfig.ts` already does exactly this for the widget/theme; this
+  // mirrors it for the one window that also needs local mutable state for
+  // `patch`'s optimistic updates.
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen<Config>("config-updated", (e) => {
+      if (!active) return;
+      setCfg(e.payload);
+      setPortInput(String(e.payload.port));
+    });
+    return () => {
+      active = false;
+      void unlisten.then((un) => un());
+    };
+  }, []);
+
+  // The tray's suggestion line emits this right after showing the window —
+  // scroll to the section so the click actually lands somewhere. In `tauri
+  // dev`, `show_settings` re-navigates the webview (see tray.rs), which would
+  // tear down a listener registered before that navigation finishes; the
+  // Rust side compensates with a short delay before emitting, so registering
+  // here (on mount) is enough in both dev and release.
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen("beacon://open-filters", () => {
+      if (!active) return;
+      filterSectionRef.current?.scrollIntoView({ behavior: "smooth" });
+    });
+    return () => {
+      active = false;
+      void unlisten.then((un) => un());
+    };
+  }, []);
 
   // Persist a full config and reflect backend errors.
   const persist = useCallback(
@@ -359,6 +398,10 @@ export default function Settings() {
         </div>
       </Section>
 
+      <div ref={filterSectionRef}>
+        <SessionFiltering cfg={cfg} patch={patch} flash={flash} />
+      </div>
+
       <Section label="Claude Code hooks">
         <div className="sCard sCardPad">
           <div className="sHookStatus">
@@ -408,7 +451,7 @@ export default function Settings() {
   );
 }
 
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
+export function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <section className="sSection">
       <div className="sSectionLabel">{label}</div>
@@ -417,7 +460,7 @@ function Section({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-function Toggle({
+export function Toggle({
   checked,
   disabled,
   onChange,

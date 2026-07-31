@@ -1,0 +1,28 @@
+# Session Signals bridge forwarder (NAT WSL / full VMs). Not needed in mirrored mode.
+#
+# Install (systemd must be enabled — for WSL put `[boot]\nsystemd=true` in /etc/wsl.conf,
+# then `wsl --shutdown` from Windows):
+#   sudo cp forwarder.sh /usr/local/bin/session-signals-forwarder.sh
+#   sudo chmod +x /usr/local/bin/session-signals-forwarder.sh
+#   sudo cp session-signals-forwarder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now session-signals-forwarder
+#
+# GATEWAY is resolved from the default route at start; override with an
+# Environment= line below if your VM reaches the host on a fixed address.
+[Unit]
+Description=Session Signals bridge forwarder (guest -> Windows host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/session-signals-forwarder.sh
+# Environment=GATEWAY=172.27.208.1
+# Environment=PORT_LOCAL=4317
+# Environment=PORT_BRIDGE=4318
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -286,6 +286,24 @@ body {
   flex: none;
 }
 
+/* VM/WSL origin tag — same chip shape as the worktree marker, but tinted so a
+   bridged session reads as "elsewhere" at a glance. Slightly more present than
+   the worktree marker (it's identity, not a subtle attribute). */
+.wRowRemote {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent, var(--label-2));
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 13px;
+  opacity: 0.75;
+  flex: none;
+}
+
 .wRowState {
   font-size: 11.5px;
   font-weight: 500;
