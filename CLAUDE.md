@@ -198,7 +198,8 @@ session-signals/
 - No browser storage APIs. Persist via `tauri-plugin-store` (JSON in app config
   dir): settings, window position, theme.
 - Versioning: SemVer, releases-only. `package.json` is the single source of
-  truth; bump via `npm run release:{patch,minor,major}`. Never hand-edit the
+  truth; bump via `npm run release:prepare -- {patch,minor,major}`, which opens
+  a release PR (never push a version commit straight to `main`). Never hand-edit the
   version in `tauri.conf.json` / `Cargo.toml`. See `docs/VERSIONING.md`.
 
 ## Guardrails

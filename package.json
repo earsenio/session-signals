@@ -2,7 +2,7 @@
   "name": "cc-beacon",
   "private": true,
   "version": "0.4.1",
-  "description": "Session Signals — a lightweight, fully-local desktop status indicator for Claude Code.",
+  "description": "Session Signals \u2014 a lightweight, fully-local desktop status indicator for Claude Code.",
   "license": "MIT",
   "author": "Session Signals contributors",
   "repository": {
@@ -28,10 +28,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "version": "node scripts/sync-version.mjs && cargo update --manifest-path src-tauri/Cargo.toml -p cc-beacon --quiet && git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock",
-    "postversion": "git push --follow-tags",
-    "release:patch": "npm version patch",
-    "release:minor": "npm version minor",
-    "release:major": "npm version major"
+    "release:prepare": "node scripts/release.mjs prepare",
+    "release:tag": "node scripts/release.mjs tag"
   },
   "dependencies": {
     "@fontsource/geist-mono": "^5.2.8",

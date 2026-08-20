@@ -64,7 +64,7 @@ truth** — never hand-edit the version in `tauri.conf.json` or `Cargo.toml`. Bu
 via:
 
 ```bash
-npm run release:patch   # or release:minor / release:major
+npm run release:prepare -- patch   # or minor / major
 ```
 
 Full details: [docs/VERSIONING.md](docs/VERSIONING.md). Note user-facing changes
@@ -74,19 +74,29 @@ in [CHANGELOG.md](CHANGELOG.md) under **Unreleased**.
 
 Releases are automated by `.github/workflows/release.yml` (maintainers only).
 
-1. Move the **Unreleased** notes in [CHANGELOG.md](CHANGELOG.md) under the new
-   version heading, then commit.
-2. From a clean working tree, bump + tag + push in one step:
+The version bump goes through a pull request like any other change — `main`
+requires a PR and four green checks, and a release must not be the one thing that
+skips them.
+
+1. From a clean, up-to-date `main`, prepare the bump:
    ```bash
-   npm run release:patch   # or release:minor / release:major
+   npm run release:prepare -- patch   # or minor / major
    ```
-   This bumps `package.json`, syncs `Cargo.toml`/`Cargo.lock`, creates the
-   `vX.Y.Z` commit and tag, and pushes both (the `postversion` hook).
-3. The pushed tag triggers the **Release** workflow. It builds the macOS
+   This branches `release/vX.Y.Z`, bumps `package.json`, syncs
+   `Cargo.toml`/`Cargo.lock`, commits, and pushes the branch.
+2. Move the **Unreleased** notes in [CHANGELOG.md](CHANGELOG.md) under the new
+   version heading, commit to the same branch, then open and merge a PR.
+3. Tag the merged commit from `main`:
+   ```bash
+   git checkout main && git pull
+   npm run release:tag
+   ```
+4. The pushed tag triggers the **Release** workflow. It builds the macOS
    (universal `.dmg`) and Windows (`.msi`/`.exe`) installers with
    [`tauri-action`](https://github.com/tauri-apps/tauri-action) and uploads them
    to a **draft** GitHub Release named `Session Signals vX.Y.Z`.
-4. Review the attached installers, then **publish** the draft Release.
+5. Review the attached installers — install the bundle and confirm notifications
+   fire, which only works from a bundled app — then **publish** the draft Release.
 
 To (re)build an existing tag without re-tagging, dispatch the workflow manually:
 
