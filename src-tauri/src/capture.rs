@@ -88,10 +88,17 @@ cwd=$(printf '%s' "$payload" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]
 # the app — see the module docs. Silent, best-effort: no git, or a cwd that
 # isn't a repo, just leaves the fields empty and the app falls back to
 # basename(cwd).
-branch=""; repo=""; wt="false"
+branch=""; repo=""; wt="false"; ver=1
 if [ -n "$cwd" ] && command -v git >/dev/null 2>&1; then
-  branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null)
-  [ "$branch" = "HEAD" ] && branch=""   # detached
+  # ver=2 marks the git fields authoritative, so the engine replaces what it
+  # holds. Only claimed once the resolution below has actually run: a report
+  # that never reached git must not wipe a good label off the row.
+  ver=2
+  # symbolic-ref, not `rev-parse --abbrev-ref`: rev-parse prints the literal
+  # "HEAD" for a detached head *and* for an unborn one (a fresh `git init`
+  # before its first commit), which would blank a perfectly good branch name.
+  # symbolic-ref gives the branch when there is one, nothing when detached.
+  branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
   # --path-format=absolute (git >= 2.31) is required, not cosmetic: without it
   # a cwd *below* the repo root returns --git-dir absolute but --git-common-dir
   # relative ("../.git"), so the inequality test below would call every
@@ -110,6 +117,13 @@ if [ -n "$cwd" ] && command -v git >/dev/null 2>&1; then
     else
       repo=$(basename "$top")
     fi
+  else
+    # git older than 2.31 rejects --path-format. --show-toplevel is absolute on
+    # its own, so the repo can still be named; only worktree detection is lost.
+    # Without this the branch would resolve while the folder fell back to
+    # basename(cwd) — a subdirectory cwd would read "src-tauri (main)".
+    top=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+    [ -n "$top" ] && repo=$(basename "$top")
   fi
 fi
 # The terminal handle is fixed for the life of a session, so only the
@@ -150,7 +164,7 @@ mode="full"
 curl -s -m 2 -X POST "http://127.0.0.1:$PORT/hook" \
   -H "Content-Type: application/json" \
   -H "X-Beacon-Token: $TOKEN" \
-  -d "{\"hook_event_name\":\"BeaconTerminal\",\"capture_version\":2,\"capture_mode\":\"$mode\",\"session_id\":\"$(jesc "$sid")\",\"cwd\":\"$(jesc "$cwd")\",\"git_base\":\"$(jesc "$repo")\",\"git_branch\":\"$(jesc "$branch")\",\"git_worktree\":$wt$term}" \
+  -d "{\"hook_event_name\":\"BeaconTerminal\",\"capture_version\":$ver,\"capture_mode\":\"$mode\",\"session_id\":\"$(jesc "$sid")\",\"cwd\":\"$(jesc "$cwd")\",\"git_base\":\"$(jesc "$repo")\",\"git_branch\":\"$(jesc "$branch")\",\"git_worktree\":$wt$term}" \
   >/dev/null 2>&1
 exit 0
 "#;
@@ -189,10 +203,13 @@ for ($i = 0; $i -lt 24; $i++) {
 }
 # Git identity, resolved here rather than in the app so the app never opens a
 # path under the session's cwd (see the module docs).
-$branch = ''; $repo = ''; $wt = $false
+$branch = ''; $repo = ''; $wt = $false; $ver = 1
 if ($cwd) {
-  $branch = (& git -C $cwd rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1)
-  if ($branch -eq 'HEAD') { $branch = '' }
+  # $ver = 2 only once resolution has actually run — see the sh template.
+  $ver = 2
+  # symbolic-ref, not rev-parse --abbrev-ref: the latter prints "HEAD" for an
+  # unborn head too, blanking a good branch name.
+  $branch = (& git -C $cwd symbolic-ref --short HEAD 2>$null | Select-Object -First 1)
   # --path-format=absolute (git >= 2.31) is required so the worktree test below
   # compares like with like; without it --git-common-dir can come back relative.
   $gp = @(& git -C $cwd rev-parse --path-format=absolute --show-toplevel --git-dir --git-common-dir 2>$null)
@@ -204,11 +221,15 @@ if ($cwd) {
     } else {
       $repo = Split-Path -Leaf $gp[0]
     }
+  } else {
+    # git < 2.31 rejects --path-format; --show-toplevel is absolute regardless.
+    $top = (& git -C $cwd rev-parse --show-toplevel 2>$null | Select-Object -First 1)
+    if ($top) { $repo = Split-Path -Leaf $top }
   }
 }
 if (-not $branch) { $branch = '' }
 if (-not $repo) { $repo = '' }
-$body = @{ hook_event_name = 'BeaconTerminal'; capture_version = 2; capture_mode = 'full'; session_id = $sid; cwd = $cwd; git_base = $repo; git_branch = $branch; git_worktree = $wt; terminal_pid = $appPid; terminal_app = $appName } | ConvertTo-Json -Compress
+$body = @{ hook_event_name = 'BeaconTerminal'; capture_version = $ver; capture_mode = 'full'; session_id = $sid; cwd = $cwd; git_base = $repo; git_branch = $branch; git_worktree = $wt; terminal_pid = $appPid; terminal_app = $appName } | ConvertTo-Json -Compress
 try {
   Invoke-RestMethod -Uri "http://127.0.0.1:$port/hook" -Method Post -ContentType 'application/json' -Headers @{ 'X-Beacon-Token' = $token } -Body $body -TimeoutSec 2 | Out-Null
 } catch {}
@@ -329,6 +350,18 @@ mod tests {
     /// Run the rendered script with `cwd` in its stdin payload and a stubbed
     /// `curl` on PATH, and return the JSON body it tried to POST.
     fn run_capture(dir: &Path, cwd: &str, mode_arg: Option<&str>) -> serde_json::Value {
+        run_capture_with_path(dir, cwd, mode_arg, true)
+    }
+
+    /// `with_git == false` builds a PATH containing only the stub `curl` plus
+    /// the handful of utilities the script genuinely needs, deliberately
+    /// omitting `git` — the "hook ran under a stripped PATH" case.
+    fn run_capture_with_path(
+        dir: &Path,
+        cwd: &str,
+        mode_arg: Option<&str>,
+        with_git: bool,
+    ) -> serde_json::Value {
         use std::os::unix::fs::PermissionsExt;
 
         let bin = dir.join("bin");
@@ -353,11 +386,25 @@ mod tests {
         })
         .to_string();
 
-        let path_env = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path_env = if with_git {
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )
+        } else {
+            // Symlink in only what the script needs, so `command -v git` fails
+            // while `sed`/`ps`/`awk` still resolve.
+            for tool in ["sh", "cat", "sed", "awk", "ps", "basename", "dirname"] {
+                if let Ok(out) = Command::new("/usr/bin/which").arg(tool).output() {
+                    let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !found.is_empty() {
+                        let _ = std::os::unix::fs::symlink(&found, bin.join(tool));
+                    }
+                }
+            }
+            bin.display().to_string()
+        };
         let mut cmd = Command::new("sh");
         cmd.arg(&script);
         if let Some(m) = mode_arg {
@@ -388,6 +435,12 @@ mod tests {
         let body = std::fs::read_to_string(&out_file).expect("script never called curl");
         serde_json::from_str(&body)
             .unwrap_or_else(|e| panic!("script emitted invalid JSON ({e}): {body}"))
+    }
+
+    /// Like [`run_capture`] but with `git` unreachable: PATH contains only the
+    /// stub-`curl` directory, so `command -v git` fails inside the script.
+    fn run_capture_no_git(dir: &Path, cwd: &str) -> serde_json::Value {
+        run_capture_with_path(dir, cwd, None, false)
     }
 
     /// A template typo would silently disable capture at runtime (the hook's
@@ -486,6 +539,51 @@ mod tests {
         assert_eq!(v["git_base"], "");
         assert_eq!(v["git_branch"], "");
         assert_eq!(v["git_worktree"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repo with no commits yet still has a branch — `git init -b main` writes
+    /// `ref: refs/heads/main` to HEAD before any commit exists. `rev-parse
+    /// --abbrev-ref` prints the literal "HEAD" there, exactly as it does for a
+    /// genuinely detached head, so keying on that string silently blanked the
+    /// branch for every freshly-initialized repo. `symbolic-ref` tells them apart.
+    #[test]
+    fn unborn_head_still_reports_its_branch() {
+        let dir = scratch("unborn");
+        let repo = dir.join("myrepo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+
+        let v = run_capture(&dir, repo.to_str().unwrap(), None);
+        assert_eq!(v["git_base"], "myrepo");
+        assert_eq!(
+            v["git_branch"], "main",
+            "a repo before its first commit still has a branch"
+        );
+        assert_eq!(v["capture_version"], 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When git can't be reached at all the report must NOT claim version 2 —
+    /// the engine treats a v2 report as authoritative and replaces the row's
+    /// cached identity wholesale, so an empty "didn't run" report would wipe a
+    /// good `repo (branch)` label down to the bare folder name.
+    #[test]
+    fn a_report_that_never_ran_git_does_not_claim_authority() {
+        let dir = scratch("nogit");
+        let repo = dir.join("myrepo");
+        repo_fixture(&repo);
+
+        // Same script, but with git absent from PATH.
+        let v = run_capture_no_git(&dir, repo.to_str().unwrap());
+        assert_eq!(
+            v["capture_version"], 1,
+            "unresolved git must not present itself as authoritative"
+        );
+        assert_eq!(v["git_base"], "");
+        assert_eq!(v["git_branch"], "");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

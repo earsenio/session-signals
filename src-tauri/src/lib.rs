@@ -73,7 +73,8 @@ fn persist_capture(app: &AppHandle, ev: &HookEvent) {
     // carries the terminal handle, every `Stop` carries only the git identity.
     // Overwriting wholesale would let the first per-turn report erase the stored
     // pid and silently break click-to-focus across restarts.
-    let entry = map.entry(ev.session_id.clone()).or_default();
+    let previous = map.get(&ev.session_id).cloned().unwrap_or_default();
+    let mut entry = previous.clone();
     if ev.terminal_pid.is_some() {
         entry.pid = ev.terminal_pid;
         entry.app = ev.terminal_app.clone();
@@ -84,6 +85,13 @@ fn persist_capture(app: &AppHandle, ev: &HookEvent) {
         entry.branch = ev.git_branch.clone().filter(|v| !v.is_empty());
         entry.worktree = ev.git_worktree.unwrap_or(false);
     }
+    // Capture now reports every turn, and the answer is the same every turn once
+    // a session settles. Without this the store would be re-serialized and
+    // written to disk at every turn boundary of every live session.
+    if map.contains_key(&ev.session_id) && entry == previous {
+        return;
+    }
+    map.insert(ev.session_id.clone(), entry);
     if let Ok(v) = serde_json::to_value(&map) {
         store.set(KEY_CAPTURES, v);
         let _ = store.save();
@@ -194,7 +202,10 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
     // and the repo/branch label survive a Session Signals restart — an
     // already-running session never re-fires `SessionStart`.
     match ev.hook_event_name.as_str() {
-        "BeaconTerminal" => persist_capture(app, &ev),
+        // Only what the engine accepted: a turn-mode report that lost the race
+        // with `SessionEnd` is rejected there (`changed: false`), and must not
+        // re-insert the entry `forget_capture` just deleted.
+        "BeaconTerminal" if outcome.changed => persist_capture(app, &ev),
         "SessionEnd" => forget_capture(app, &ev.session_id),
         _ => {}
     }

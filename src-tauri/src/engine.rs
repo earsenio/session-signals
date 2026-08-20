@@ -232,7 +232,7 @@ pub struct SessionView {
 /// a row on their own.
 /// Fields are individually defaulted so entries written by an older build
 /// (which stored only the terminal handle) still deserialize.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapturedTerminal {
     #[serde(default)]
     pub pid: Option<i32>,
@@ -446,12 +446,14 @@ impl Engine {
                 // report that lost the race with `SessionEnd` resurrect a dead
                 // session — the same hazard `recent_ends` guards for heartbeats,
                 // which applies here too now that capture fires every turn.
+                //
+                // A *full* report accompanies `SessionStart`, so it may create one
+                // even for an id that was just ended: `claude --resume <id>` reuses
+                // the session id, and that row is legitimately starting again. (An
+                // end-tombstone here would silently drop the terminal handle for
+                // the resumed run.)
                 let known = self.sessions.contains_key(&ev.session_id);
-                let tombstoned = self
-                    .recent_ends
-                    .get(&ev.session_id)
-                    .is_some_and(|t| t.elapsed() < END_TOMBSTONE);
-                let may_create = ev.capture_mode.as_deref() != Some("turn") && !tombstoned;
+                let may_create = ev.capture_mode.as_deref() != Some("turn");
                 if !known && !may_create {
                     return ApplyOutcome {
                         changed: false,
@@ -1143,6 +1145,38 @@ mod tests {
             e.snapshot().is_empty(),
             "a per-turn capture must not create a row"
         );
+    }
+
+    /// `claude --resume <id>` reuses the session id, so a `SessionStart` capture
+    /// can legitimately arrive moments after that id's `SessionEnd`. The
+    /// end-tombstone must not swallow it — doing so drops the terminal handle
+    /// for the resumed run and silently disables click-to-focus.
+    #[test]
+    fn full_capture_survives_a_recent_session_end() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "s"));
+        e.apply(&ev("SessionEnd", "s"));
+        assert!(e.snapshot().is_empty());
+
+        // Resume: the capture beats the http SessionStart back to the listener.
+        e.apply(&HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/tmp/proj".into(),
+            capture_version: Some(2),
+            capture_mode: Some("full".into()),
+            git_base: Some("proj".into()),
+            git_branch: Some("main".into()),
+            terminal_pid: Some(4242),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            e.terminal_pid("s"),
+            Some(4242),
+            "a resumed session keeps its terminal handle"
+        );
+        assert_eq!(e.snapshot()[0].branch.as_deref(), Some("main"));
     }
 
     /// A handle+identity remembered across a Session Signals restart attaches
