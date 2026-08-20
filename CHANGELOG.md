@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-20
+
 ### Fixed
 - macOS no longer asks for permission to read your project folders. Session
   Signals used to resolve each row's git branch by reading `<cwd>/.git/HEAD`
@@ -29,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sitting at **Working** (orange). These tools block on you the moment they fire
   but emit no notification the listener can see, so the engine now escalates on
   their `PreToolUse` and returns to **Working** once you answer.
+
+### Changed
+- Dependency refresh: Tauri 2.11.5, `tauri-plugin-store` 2.4.4,
+  `tauri-plugin-single-instance` 2.4.3, serde 1.0.229, serde_json 1.0.151,
+  and the frontend toolchain (Vite 8.2.1, ESLint 10.7.0, Prettier 3.9.5).
 
 ## [0.3.0] - 2026-06-29
 
@@ -103,7 +110,8 @@ OSS-readiness pass (licensing, docs, tooling, CI, and security hardening).
 - Concurrent sessions no longer block one another; idle sessions no longer turn
   red (they stay visible until a configurable drop window).
 
-[Unreleased]: https://github.com/earsenio/session-signals/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/earsenio/session-signals/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/earsenio/session-signals/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/earsenio/session-signals/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/earsenio/session-signals/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/earsenio/session-signals/releases/tag/v0.1.1
