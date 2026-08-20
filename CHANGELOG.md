@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- macOS no longer asks for permission to read your project folders. Session
+  Signals used to resolve each row's git branch by reading `<cwd>/.git/HEAD`
+  itself, and macOS grants folder access per protected category (Desktop,
+  Documents, Downloads, network volumes are each a separate grant) — so the
+  first session under a folder you hadn't yet approved popped a prompt, on a
+  2-second poll. The repo and branch are now resolved by the capture hook, which
+  runs in your own shell under the terminal's existing access, and arrive in the
+  hook payload. The app reads nothing outside its own data directory,
+  `~/.claude/settings.json`, and each session's transcript.
+- The capture hook now also runs on `Stop` (macOS/Linux), so switching branches
+  mid-session updates the widget within one turn instead of at the next restart.
+- Click-to-focus no longer breaks after a restart once per-turn capture starts:
+  the stored terminal handle is merged rather than overwritten.
+- A working directory containing a quote or backslash no longer produces a
+  malformed capture payload, which previously dropped that session's terminal
+  handle silently.
 - A session blocked on an `AskUserQuestion` prompt or plan approval
   (`ExitPlanMode`) now turns **Needs you** (red) and notifies, instead of
   sitting at **Working** (orange). These tools block on you the moment they fire

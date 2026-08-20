@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Per-session status. Maps to the traffic-light colors in the spec.
@@ -64,6 +64,22 @@ struct Session {
     /// terminals that expose a per-tab tty (Terminal.app, iTerm2), rather than
     /// only raising the app. `None` on Windows / when unresolved.
     terminal_tty: Option<String>,
+    /// Repo root name for `cwd` — the **main** repo's name when `cwd` is a
+    /// linked worktree. `None` when the session isn't in a repo, or before the
+    /// capture hook has reported (fall back to `fallback_basename(cwd)`).
+    ///
+    /// Reported *to* us by the capture hook rather than read from disk here, and
+    /// that's load-bearing, not incidental: resolving it in-process meant opening
+    /// paths under an arbitrary user directory, and macOS gates those per
+    /// protected category (Desktop / Documents / Downloads / network volumes are
+    /// each a separate TCC grant), so every session in a not-yet-granted folder
+    /// popped a permission prompt. See `capture.rs`. Don't reintroduce a
+    /// filesystem read here.
+    git_base: Option<String>,
+    /// Current branch, or `None` when detached / not a repo / not yet reported.
+    git_branch: Option<String>,
+    /// True when `cwd` is a linked `git worktree` (not a submodule).
+    git_worktree: bool,
     /// Short human descriptor of what this session is about — Claude Code's own
     /// generated session title (the `ai-title` in the transcript), falling back
     /// to the first human prompt. Derived locally from `transcript_path` by
@@ -122,6 +138,27 @@ pub struct HookEvent {
     /// Present only on `BeaconTerminal`: the session's controlling tty.
     #[serde(default)]
     pub terminal_tty: Option<String>,
+    /// Capture-script protocol version. `>= 2` means the git fields below are
+    /// authoritative and replace whatever we hold. Absent means an older script
+    /// that reports no git facts at all — it must not wipe what we already have.
+    #[serde(default)]
+    pub capture_version: Option<u32>,
+    /// `"full"` (SessionStart) or `"turn"` (Stop). A `"turn"` report may not
+    /// create a session row: it can land after `SessionEnd` and would otherwise
+    /// resurrect a dead session. See the `BeaconTerminal` arm in `apply`.
+    #[serde(default)]
+    pub capture_mode: Option<String>,
+    /// Repo root name for the session's cwd (main repo's name for a worktree),
+    /// empty when it isn't a repo. Resolved by the capture hook — see the
+    /// `git_base` field on `Session` for why it isn't read here.
+    #[serde(default)]
+    pub git_base: Option<String>,
+    /// Current branch, empty when detached or not a repo.
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    /// Whether the cwd is a linked git worktree.
+    #[serde(default)]
+    pub git_worktree: Option<bool>,
 }
 
 /// A state change for one session, reported by `apply` so the notification
@@ -193,11 +230,25 @@ pub struct SessionView {
 /// seeds them back in here at startup; they are a *side table* — they attach to
 /// a session only when a real hook event (re)creates its row, and never conjure
 /// a row on their own.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Fields are individually defaulted so entries written by an older build
+/// (which stored only the terminal handle) still deserialize.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapturedTerminal {
+    #[serde(default)]
     pub pid: Option<i32>,
+    #[serde(default)]
     pub app: Option<String>,
+    #[serde(default)]
     pub tty: Option<String>,
+    /// Repo root name, remembered so a Session Signals restart shows the right
+    /// label immediately instead of falling back to `basename(cwd)` until the
+    /// session's next turn.
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub worktree: bool,
 }
 
 /// How long after `SessionEnd` a *heartbeat* for that session id is ignored
@@ -390,6 +441,25 @@ impl Engine {
             // the session if it raced ahead of SessionStart so the pid isn't lost.
             "BeaconTerminal" => {
                 let now = Instant::now();
+                // A per-turn report belongs to a session that is already live, so
+                // it may only update an existing row. Creating one would let a
+                // report that lost the race with `SessionEnd` resurrect a dead
+                // session — the same hazard `recent_ends` guards for heartbeats,
+                // which applies here too now that capture fires every turn.
+                //
+                // A *full* report accompanies `SessionStart`, so it may create one
+                // even for an id that was just ended: `claude --resume <id>` reuses
+                // the session id, and that row is legitimately starting again. (An
+                // end-tombstone here would silently drop the terminal handle for
+                // the resumed run.)
+                let known = self.sessions.contains_key(&ev.session_id);
+                let may_create = ev.capture_mode.as_deref() != Some("turn");
+                if !known && !may_create {
+                    return ApplyOutcome {
+                        changed: false,
+                        transition: None,
+                    };
+                }
                 let s = self
                     .sessions
                     .entry(ev.session_id.clone())
@@ -404,6 +474,9 @@ impl Engine {
                         terminal_pid: None,
                         terminal_app: None,
                         terminal_tty: None,
+                        git_base: None,
+                        git_branch: None,
+                        git_worktree: false,
                         descriptor: None,
                         descriptor_checked_at: None,
                     });
@@ -416,8 +489,22 @@ impl Engine {
                 if ev.terminal_tty.as_deref().is_some_and(|t| !t.is_empty()) {
                     s.terminal_tty = ev.terminal_tty.clone();
                 }
+                // Git facts are reported wholesale, so a v2 report REPLACES them:
+                // checking out a detached HEAD has to clear the branch, not leave
+                // a stale one on the row. A pre-v2 script reports none and must
+                // leave ours alone.
+                if ev.capture_version.unwrap_or(0) >= 2 {
+                    s.git_base = ev.git_base.clone().filter(|v| !v.is_empty());
+                    s.git_branch = ev.git_branch.clone().filter(|v| !v.is_empty());
+                    s.git_worktree = ev.git_worktree.unwrap_or(false);
+                }
                 s.last_seen = now;
-                if !ev.cwd.is_empty() {
+                // Only adopt the capture's cwd when we have none. The script
+                // lifts it out of the raw stdin JSON with `sed`, which can't
+                // unescape a path containing `"` or `\`; the real hooks parse
+                // properly, so theirs always wins. See `capture.rs`'s
+                // `quotes_and_backslashes_in_cwd_stay_valid_json`.
+                if s.cwd.is_empty() && !ev.cwd.is_empty() {
                     s.cwd = ev.cwd.clone();
                 }
                 ApplyOutcome {
@@ -492,63 +579,84 @@ impl Engine {
         // missing a handle — so a Session Signals restart keeps click-to-focus for
         // already-running sessions, which never re-fire `SessionStart`.
         let remembered = self.pending_captures.get(&ev.session_id).cloned();
-        // `from`: Some(prev) on a real change, None on a same-state repeat.
-        let (from, cwd, terminal_pid) = match self.sessions.entry(ev.session_id.clone()) {
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                let s = o.get_mut();
-                let prev = s.state;
-                let changed_state = prev != state;
-                if changed_state {
-                    s.state = state;
-                    s.state_since = now;
-                }
-                s.last_seen = now;
-                s.stale = false;
-                if !ev.cwd.is_empty() {
-                    s.cwd = ev.cwd.clone();
-                }
-                // Backfill a remembered handle if this row never resolved one.
-                if s.terminal_pid.is_none() {
-                    if let Some(cap) = &remembered {
-                        s.terminal_pid = cap.pid;
-                        s.terminal_app = cap.app.clone();
-                        s.terminal_tty = cap.tty.clone();
-                    }
-                }
-                (
+        // `from`: Some(prev) on a real change, None on a same-state repeat. The
+        // label parts ride along so the notification below can be built without
+        // re-borrowing the session (and, since they're plain cached scalars,
+        // without touching the filesystem).
+        let (from, cwd, terminal_pid, base, branch) =
+            match self.sessions.entry(ev.session_id.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let s = o.get_mut();
+                    let prev = s.state;
+                    let changed_state = prev != state;
                     if changed_state {
-                        Some(Some(prev))
-                    } else {
-                        None
-                    },
-                    s.cwd.clone(),
-                    s.terminal_pid,
-                )
-            }
-            std::collections::hash_map::Entry::Vacant(v) => {
-                let cwd = ev.cwd.clone();
-                let cap = remembered.unwrap_or_default();
-                let pid = cap.pid;
-                v.insert(Session {
-                    cwd: cwd.clone(),
-                    state,
-                    last_seen: now,
-                    state_since: now,
-                    stale: false,
-                    subagent_count: 0,
-                    sub_since: None,
-                    terminal_pid: cap.pid,
-                    terminal_app: cap.app,
-                    terminal_tty: cap.tty,
-                    descriptor: None,
-                    descriptor_checked_at: None,
-                });
-                (Some(None), cwd, pid)
-            }
-        };
+                        s.state = state;
+                        s.state_since = now;
+                    }
+                    s.last_seen = now;
+                    s.stale = false;
+                    if !ev.cwd.is_empty() {
+                        s.cwd = ev.cwd.clone();
+                    }
+                    // Backfill a remembered handle if this row never resolved one.
+                    if s.terminal_pid.is_none() {
+                        if let Some(cap) = &remembered {
+                            s.terminal_pid = cap.pid;
+                            s.terminal_app = cap.app.clone();
+                            s.terminal_tty = cap.tty.clone();
+                        }
+                    }
+                    // Likewise the remembered git identity: without this, a row
+                    // recreated after a Session Signals restart would sit on
+                    // `basename(cwd)` with no branch until the session's next turn.
+                    if s.git_base.is_none() {
+                        if let Some(cap) = &remembered {
+                            s.git_base = cap.base.clone();
+                            s.git_branch = cap.branch.clone();
+                            s.git_worktree = cap.worktree;
+                        }
+                    }
+                    (
+                        if changed_state {
+                            Some(Some(prev))
+                        } else {
+                            None
+                        },
+                        s.cwd.clone(),
+                        s.terminal_pid,
+                        s.git_base.clone(),
+                        s.git_branch.clone(),
+                    )
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let cwd = ev.cwd.clone();
+                    let cap = remembered.unwrap_or_default();
+                    let pid = cap.pid;
+                    let base = cap.base.clone();
+                    let branch = cap.branch.clone();
+                    v.insert(Session {
+                        cwd: cwd.clone(),
+                        state,
+                        last_seen: now,
+                        state_since: now,
+                        stale: false,
+                        subagent_count: 0,
+                        sub_since: None,
+                        terminal_pid: cap.pid,
+                        terminal_app: cap.app,
+                        terminal_tty: cap.tty,
+                        git_base: cap.base,
+                        git_branch: cap.branch,
+                        git_worktree: cap.worktree,
+                        descriptor: None,
+                        descriptor_checked_at: None,
+                    });
+                    (Some(None), cwd, pid, base, branch)
+                }
+            };
 
         let transition = from.map(|prev| {
-            let (folder, branch) = label_parts(&cwd);
+            let (folder, branch) = label_parts(&cwd, base.as_deref(), branch.as_deref());
             Transition {
                 session_id: ev.session_id.clone(),
                 label: combine_label(folder.clone(), branch.as_deref()),
@@ -579,7 +687,9 @@ impl Engine {
     /// its row — never on its own, so this can't conjure a phantom session.
     /// Ignored if it carries no pid (nothing to focus).
     pub fn seed_capture(&mut self, session_id: String, cap: CapturedTerminal) {
-        if cap.pid.is_some() {
+        // Worth keeping if it carries either a focusable handle or a git identity
+        // to label the row with.
+        if cap.pid.is_some() || cap.base.is_some() {
             self.pending_captures.insert(session_id, cap);
         }
     }
@@ -684,7 +794,10 @@ impl Engine {
             let should_be_stale = idle >= self.stale_timeout;
             if should_be_stale != s.stale {
                 if should_be_stale {
-                    went_stale.push((id.clone(), label_for(&s.cwd)));
+                    went_stale.push((
+                        id.clone(),
+                        label_for(&s.cwd, s.git_base.as_deref(), s.git_branch.as_deref()),
+                    ));
                     // A session we've declared silent ("No response") must not keep
                     // asserting live subagents — the matching SubagentStop may simply
                     // never have arrived. Clear the count so a greyed row doesn't read
@@ -727,19 +840,28 @@ impl Engine {
     }
 
     /// A serializable snapshot of all sessions, newest-active first.
+    ///
+    /// **Performs zero I/O.** Every displayed field is a cached scalar. This is
+    /// load-bearing on macOS, not just a nicety: `snapshot` runs on every hook
+    /// event *and* is polled every 2 s per session by the widget, so any read
+    /// under a session's `cwd` would re-trigger a TCC Files-and-Folders prompt
+    /// for each protected folder category the user happens to work in. The git
+    /// identity is pushed in by the capture hook instead — see `Session::git_base`
+    /// and `capture.rs`.
     pub fn snapshot(&self) -> Vec<SessionView> {
         let now = Instant::now();
         let mut views: Vec<SessionView> = self
             .sessions
             .iter()
             .map(|(id, s)| {
-                let (folder, branch, worktree) = label_parts_worktree(&s.cwd);
+                let (folder, branch) =
+                    label_parts(&s.cwd, s.git_base.as_deref(), s.git_branch.as_deref());
                 SessionView {
                     session_id: id.clone(),
                     label: combine_label(folder.clone(), branch.as_deref()),
                     folder,
                     branch,
-                    worktree,
+                    worktree: s.git_worktree,
                     state: s.state,
                     stale: s.stale,
                     seconds_in_state: now.duration_since(s.state_since).as_secs(),
@@ -773,44 +895,32 @@ fn is_blocking_tool(tool_name: Option<&str>) -> bool {
     matches!(tool_name, Some("AskUserQuestion") | Some("ExitPlanMode"))
 }
 
-/// Repo facts derived from a working directory, used to build the session label
-/// and the worktree marker. Pure filesystem reads — no subprocess.
-struct GitInfo {
-    /// Basename shown to the user. For a linked worktree this is the **main
-    /// repo's** name (e.g. `cc-beacon`), never the worktree folder's name.
-    base: String,
-    /// Current branch, or None when HEAD is detached/unreadable.
-    branch: Option<String>,
-    /// True when `cwd` lives in a `git worktree` (a `.git` *file* plus a
-    /// `commondir`). Submodules use a `.git` file too but have no `commondir`,
-    /// so they are not flagged.
-    worktree: bool,
+/// Build the structured session label: the repo root's name plus its branch,
+/// falling back to `basename(cwd)` when the session isn't in a repo (or the
+/// capture hook hasn't reported yet).
+///
+/// **Pure** — `base` and `branch` are the values the capture hook resolved in
+/// the user's shell and the engine cached. This used to walk `cwd`'s ancestors
+/// and read `.git/HEAD` in-process, which is what made macOS demand a
+/// Files-and-Folders grant for every protected folder a session lived in. See
+/// `Session::git_base` and `capture.rs`.
+///
+/// Shipped as separate parts so renderers never re-parse the combined string (a
+/// folder literally named `foo (bar)` would misparse).
+pub fn label_parts(
+    cwd: &str,
+    base: Option<&str>,
+    branch: Option<&str>,
+) -> (String, Option<String>) {
+    (
+        base.map(str::to_string)
+            .unwrap_or_else(|| fallback_basename(cwd)),
+        branch.map(str::to_string),
+    )
 }
 
-/// Build a human label from a working directory, structured: the git **repo
-/// root**'s basename plus its branch, if the cwd is inside a repo. We walk up
-/// from `cwd` to find the `.git` entry so a subfolder cwd (e.g.
-/// `.../proj/src-tauri`) still shows the project name and branch rather than
-/// the subfolder. Falls back to `(basename(cwd), None)` when no repo is found.
-/// No subprocess. Shipped as separate parts so renderers never re-parse the
-/// combined string (a folder literally named `foo (bar)` would misparse).
-pub fn label_parts(cwd: &str) -> (String, Option<String>) {
-    let (folder, branch, _) = label_parts_worktree(cwd);
-    (folder, branch)
-}
-
-/// Like [`label_parts`] but also reports whether the cwd is a linked git
-/// worktree, so the widget can flag it without re-reading the filesystem. For a
-/// worktree the folder is the **main repo's** name and the branch is the
-/// worktree's own checkout (both of which a `.git` *file* would otherwise hide).
-pub fn label_parts_worktree(cwd: &str) -> (String, Option<String>, bool) {
-    match git_info(cwd) {
-        Some(info) => (info.base, info.branch, info.worktree),
-        None => (fallback_basename(cwd), None, false),
-    }
-}
-
-/// `basename(cwd)` for the no-repo case; "session" for an empty cwd.
+/// `basename(cwd)` for the no-repo case; "session" for an empty cwd. String work
+/// only — `Path::file_name` parses, it does not stat.
 fn fallback_basename(cwd: &str) -> String {
     if cwd.is_empty() {
         return "session".to_string();
@@ -823,8 +933,8 @@ fn fallback_basename(cwd: &str) -> String {
 }
 
 /// The combined one-line label: `folder (branch)` or just `folder`.
-pub fn label_for(cwd: &str) -> String {
-    let (folder, branch) = label_parts(cwd);
+pub fn label_for(cwd: &str, base: Option<&str>, branch: Option<&str>) -> String {
+    let (folder, branch) = label_parts(cwd, base, branch);
     combine_label(folder, branch.as_deref())
 }
 
@@ -833,106 +943,6 @@ fn combine_label(folder: String, branch: Option<&str>) -> String {
         Some(b) => format!("{folder} ({b})"),
         None => folder,
     }
-}
-
-/// Walk up from `start` to the first ancestor containing a `.git` entry (a
-/// directory for a normal clone, a file for a worktree/submodule). Returns that
-/// ancestor — the repo root. None if no ancestor is a git repo.
-fn find_git_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
-    while let Some(d) = dir {
-        if d.join(".git").exists() {
-            return Some(d.to_path_buf());
-        }
-        dir = d.parent();
-    }
-    None
-}
-
-/// Resolve repo facts for `cwd` from the filesystem, transparently handling
-/// linked worktrees (where `.git` is a *file* pointing at the real git dir).
-fn git_info(cwd: &str) -> Option<GitInfo> {
-    if cwd.is_empty() {
-        return None;
-    }
-    let root = find_git_root(Path::new(cwd))?;
-    let dotgit = root.join(".git");
-
-    // Normal clone: `.git` is a directory; branch lives at `.git/HEAD`.
-    if dotgit.is_dir() {
-        return Some(GitInfo {
-            base: basename(&root)?,
-            branch: read_head_branch(&dotgit),
-            worktree: false,
-        });
-    }
-
-    // `.git` is a *file* → linked worktree or submodule. It points at the real
-    // git dir ("gitdir: <path>"), where this checkout's HEAD lives.
-    let gitdir = read_gitdir_pointer(&dotgit)?;
-    let branch = read_head_branch(&gitdir);
-
-    // A linked worktree's git dir carries a `commondir` pointing back at the
-    // shared repo; the repo root is that common dir's parent, giving us the main
-    // repo's name. Submodules have no `commondir`, so they keep their own folder
-    // name and are not flagged as worktrees.
-    match worktree_repo_root(&gitdir) {
-        Some(repo_root) => Some(GitInfo {
-            base: basename(&repo_root).or_else(|| basename(&root))?,
-            branch,
-            worktree: true,
-        }),
-        None => Some(GitInfo {
-            base: basename(&root)?,
-            branch,
-            worktree: false,
-        }),
-    }
-}
-
-fn basename(p: &Path) -> Option<String> {
-    p.file_name().and_then(|s| s.to_str()).map(str::to_string)
-}
-
-/// Resolve the current branch by reading `<gitdir>/HEAD`. None if HEAD is
-/// detached or unreadable.
-fn read_head_branch(gitdir: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
-    // Typical content: "ref: refs/heads/main".
-    head.trim()
-        .strip_prefix("ref: refs/heads/")
-        .map(str::to_string)
-}
-
-/// Read a `.git` *file* (worktree/submodule) and resolve the git dir it points
-/// at. Content is "gitdir: <path>"; a relative path resolves against the file's
-/// directory. Canonicalized so `..` segments collapse (best-effort).
-fn read_gitdir_pointer(dotgit_file: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(dotgit_file).ok()?;
-    let raw = content.trim().strip_prefix("gitdir:")?.trim();
-    let p = Path::new(raw);
-    let abs = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        dotgit_file.parent()?.join(p)
-    };
-    Some(std::fs::canonicalize(&abs).unwrap_or(abs))
-}
-
-/// Given a linked worktree's git dir (`…/.git/worktrees/<name>`), resolve the
-/// shared repo's working-tree root via its `commondir` file (relative to the git
-/// dir). None when there is no `commondir` — i.e. not a linked worktree.
-fn worktree_repo_root(gitdir: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
-    let p = Path::new(content.trim());
-    // `common` is the shared `.git` dir; the repo root is its parent.
-    let common = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        gitdir.join(p)
-    };
-    let common = std::fs::canonicalize(&common).unwrap_or(common);
-    common.parent().map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -994,31 +1004,204 @@ mod tests {
 
     /// Labels ship structured (folder + branch), so a directory whose *name*
     /// looks like the combined form can never be misparsed by a renderer.
+    ///
+    /// Note the paths here don't exist: label building is pure now, which is the
+    /// whole point — see `label_parts`.
     #[test]
     fn label_parts_are_structured_not_reparsed() {
-        let base = std::env::temp_dir().join(format!("beacon-label-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-
-        // A plain directory literally named "foo (bar)" — folder only, no branch.
-        let odd = base.join("foo (bar)");
-        std::fs::create_dir_all(&odd).unwrap();
-        let (folder, branch) = label_parts(odd.to_str().unwrap());
+        // A directory literally named "foo (bar)", not in a repo — folder only.
+        let (folder, branch) = label_parts("/nope/foo (bar)", None, None);
         assert_eq!(folder, "foo (bar)");
         assert_eq!(branch, None);
 
-        // A git repo: folder = repo root basename, branch from .git/HEAD — even
-        // from a subdirectory cwd.
-        let repo = base.join("proj");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        let sub = repo.join("src-tauri");
-        std::fs::create_dir_all(&sub).unwrap();
-        let (folder, branch) = label_parts(sub.to_str().unwrap());
+        // In a repo: the reported repo root name wins over the cwd's basename,
+        // so a subdirectory cwd still shows the project.
+        let (folder, branch) = label_parts("/nope/proj/src-tauri", Some("proj"), Some("main"));
         assert_eq!(folder, "proj");
         assert_eq!(branch.as_deref(), Some("main"));
-        assert_eq!(label_for(sub.to_str().unwrap()), "proj (main)");
+        assert_eq!(
+            label_for("/nope/proj/src-tauri", Some("proj"), Some("main")),
+            "proj (main)"
+        );
+    }
 
-        let _ = std::fs::remove_dir_all(&base);
+    /// The row must render from cached scalars alone. A cwd that does not exist
+    /// on disk is the strongest available proxy for "no filesystem read": before
+    /// this change the label came from walking that path for a `.git` entry,
+    /// which is exactly what made macOS prompt for folder access.
+    #[test]
+    fn snapshot_reads_nothing_from_disk() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&HookEvent {
+            hook_event_name: "SessionStart".into(),
+            session_id: "s".into(),
+            cwd: "/definitely/does/not/exist/deep/repo".into(),
+            ..Default::default()
+        });
+        e.apply(&HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/definitely/does/not/exist/deep/repo".into(),
+            capture_version: Some(2),
+            capture_mode: Some("full".into()),
+            git_base: Some("myrepo".into()),
+            git_branch: Some("feature-x".into()),
+            git_worktree: Some(true),
+            ..Default::default()
+        });
+
+        let v = &e.snapshot()[0];
+        assert_eq!(v.folder, "myrepo");
+        assert_eq!(v.branch.as_deref(), Some("feature-x"));
+        assert!(v.worktree);
+        assert_eq!(v.label, "myrepo (feature-x)");
+    }
+
+    /// Until the capture hook reports — hooks not rewired yet, capture removed,
+    /// a session that predates the upgrade — the row still has to render.
+    #[test]
+    fn session_without_capture_falls_back_to_basename() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "s"));
+
+        let v = &e.snapshot()[0];
+        assert_eq!(v.folder, "proj", "basename of cwd");
+        assert_eq!(v.branch, None);
+        assert!(!v.worktree);
+    }
+
+    /// Git facts are reported wholesale, so a fresh report replaces them —
+    /// otherwise checking out a detached HEAD would leave the previous branch
+    /// stuck on the row forever.
+    #[test]
+    fn fresh_capture_replaces_stale_branch() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "s"));
+        let cap = |branch: &str| HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/tmp/proj".into(),
+            capture_version: Some(2),
+            capture_mode: Some("turn".into()),
+            git_base: Some("proj".into()),
+            git_branch: Some(branch.to_string()),
+            ..Default::default()
+        };
+        e.apply(&cap("main"));
+        assert_eq!(e.snapshot()[0].branch.as_deref(), Some("main"));
+
+        // Detached HEAD reports an empty branch.
+        e.apply(&cap(""));
+        assert_eq!(e.snapshot()[0].branch, None);
+    }
+
+    /// An older capture script reports no git facts at all. It must not wipe
+    /// what a newer one already established.
+    #[test]
+    fn pre_v2_capture_does_not_wipe_git_facts() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "s"));
+        e.apply(&HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/tmp/proj".into(),
+            capture_version: Some(2),
+            git_base: Some("proj".into()),
+            git_branch: Some("main".into()),
+            ..Default::default()
+        });
+        // No capture_version: the pre-git script's shape.
+        e.apply(&HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/tmp/proj".into(),
+            terminal_pid: Some(42),
+            ..Default::default()
+        });
+
+        assert_eq!(e.snapshot()[0].branch.as_deref(), Some("main"));
+    }
+
+    /// Capture now fires every turn, so a per-turn report can lose the race with
+    /// `SessionEnd`. It must never bring the row back from the dead.
+    #[test]
+    fn turn_capture_does_not_resurrect_an_ended_session() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "s"));
+        e.apply(&ev("SessionEnd", "s"));
+        assert!(e.snapshot().is_empty());
+
+        e.apply(&HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/tmp/proj".into(),
+            capture_version: Some(2),
+            capture_mode: Some("turn".into()),
+            git_base: Some("proj".into()),
+            git_branch: Some("main".into()),
+            ..Default::default()
+        });
+        assert!(
+            e.snapshot().is_empty(),
+            "a per-turn capture must not create a row"
+        );
+    }
+
+    /// `claude --resume <id>` reuses the session id, so a `SessionStart` capture
+    /// can legitimately arrive moments after that id's `SessionEnd`. The
+    /// end-tombstone must not swallow it — doing so drops the terminal handle
+    /// for the resumed run and silently disables click-to-focus.
+    #[test]
+    fn full_capture_survives_a_recent_session_end() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.apply(&ev("SessionStart", "s"));
+        e.apply(&ev("SessionEnd", "s"));
+        assert!(e.snapshot().is_empty());
+
+        // Resume: the capture beats the http SessionStart back to the listener.
+        e.apply(&HookEvent {
+            hook_event_name: "BeaconTerminal".into(),
+            session_id: "s".into(),
+            cwd: "/tmp/proj".into(),
+            capture_version: Some(2),
+            capture_mode: Some("full".into()),
+            git_base: Some("proj".into()),
+            git_branch: Some("main".into()),
+            terminal_pid: Some(4242),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            e.terminal_pid("s"),
+            Some(4242),
+            "a resumed session keeps its terminal handle"
+        );
+        assert_eq!(e.snapshot()[0].branch.as_deref(), Some("main"));
+    }
+
+    /// A handle+identity remembered across a Session Signals restart attaches
+    /// when the row is recreated, so the label is right immediately rather than
+    /// after the session's next turn.
+    #[test]
+    fn seeded_capture_restores_git_identity() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(3600));
+        e.seed_capture(
+            "s".into(),
+            CapturedTerminal {
+                pid: None,
+                app: None,
+                tty: None,
+                base: Some("proj".into()),
+                branch: Some("main".into()),
+                worktree: true,
+            },
+        );
+        e.apply(&ev("UserPromptSubmit", "s"));
+
+        let v = &e.snapshot()[0];
+        assert_eq!(v.folder, "proj");
+        assert_eq!(v.branch.as_deref(), Some("main"));
+        assert!(v.worktree);
     }
 
     /// A straggler heartbeat (e.g. a subagent's late `PostToolUse` /
@@ -1304,6 +1487,7 @@ mod tests {
                 pid: Some(7777),
                 app: Some("Terminal".to_string()),
                 tty: Some("/dev/ttys003".to_string()),
+                ..Default::default()
             },
         );
         // A seed alone must NOT create a session row (no phantom rows).
@@ -1348,6 +1532,7 @@ mod tests {
                 pid: Some(7777),
                 app: None,
                 tty: None,
+                ..Default::default()
             },
         );
         e.apply(&ev("SessionEnd", "a"));
@@ -1701,54 +1886,5 @@ mod tests {
         assert!(!out.changed, "nothing to sweep");
         assert!(out.went_stale.is_empty());
         assert_eq!(e.rollup(), Rollup::Grey);
-    }
-
-    /// Build a throwaway repo + linked worktree on disk and check label
-    /// resolution: a normal clone shows its own name + branch and isn't flagged;
-    /// a linked worktree shows the **main repo's** name + the worktree's branch
-    /// and is flagged.
-    #[test]
-    fn label_parts_resolves_clone_and_worktree() {
-        use std::fs;
-        let base = std::env::temp_dir().join(format!("beacon_wt_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-
-        // Normal clone: `.git` is a directory with HEAD → ("myrepo", "main", not wt).
-        let repo = base.join("myrepo");
-        let gitdir = repo.join(".git");
-        fs::create_dir_all(&gitdir).unwrap();
-        fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-        let (folder, branch, wt) = label_parts_worktree(repo.to_str().unwrap());
-        assert_eq!(folder, "myrepo");
-        assert_eq!(branch.as_deref(), Some("main"));
-        assert!(!wt, "a normal clone is not a worktree");
-
-        // Linked worktree: a separate working dir whose `.git` *file* points at
-        // `<repo>/.git/worktrees/feat`, which carries its own HEAD + a commondir
-        // (`../..`) resolving back to the shared `.git`.
-        let wt_gitdir = gitdir.join("worktrees").join("feat");
-        fs::create_dir_all(&wt_gitdir).unwrap();
-        fs::write(wt_gitdir.join("HEAD"), "ref: refs/heads/feature-x\n").unwrap();
-        fs::write(wt_gitdir.join("commondir"), "../..\n").unwrap();
-        let wt_dir = base.join("scratch-worktree");
-        fs::create_dir_all(&wt_dir).unwrap();
-        fs::write(
-            wt_dir.join(".git"),
-            format!("gitdir: {}\n", wt_gitdir.display()),
-        )
-        .unwrap();
-        let (folder, branch, wt) = label_parts_worktree(wt_dir.to_str().unwrap());
-        assert_eq!(
-            folder, "myrepo",
-            "worktree shows main repo name, not the worktree folder name"
-        );
-        assert_eq!(
-            branch.as_deref(),
-            Some("feature-x"),
-            "resolves the worktree's own branch"
-        );
-        assert!(wt, "flagged as a worktree");
-
-        let _ = fs::remove_dir_all(&base);
     }
 }

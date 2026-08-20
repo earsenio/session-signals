@@ -69,14 +69,29 @@ fn persist_capture(app: &AppHandle, ev: &HookEvent) {
             serde_json::from_value::<std::collections::HashMap<String, CapturedTerminal>>(v).ok()
         })
         .unwrap_or_default();
-    map.insert(
-        ev.session_id.clone(),
-        CapturedTerminal {
-            pid: ev.terminal_pid,
-            app: ev.terminal_app.clone(),
-            tty: ev.terminal_tty.clone(),
-        },
-    );
+    // Merge, don't replace. Two different reports land here: `SessionStart`
+    // carries the terminal handle, every `Stop` carries only the git identity.
+    // Overwriting wholesale would let the first per-turn report erase the stored
+    // pid and silently break click-to-focus across restarts.
+    let previous = map.get(&ev.session_id).cloned().unwrap_or_default();
+    let mut entry = previous.clone();
+    if ev.terminal_pid.is_some() {
+        entry.pid = ev.terminal_pid;
+        entry.app = ev.terminal_app.clone();
+        entry.tty = ev.terminal_tty.clone();
+    }
+    if ev.capture_version.unwrap_or(0) >= 2 {
+        entry.base = ev.git_base.clone().filter(|v| !v.is_empty());
+        entry.branch = ev.git_branch.clone().filter(|v| !v.is_empty());
+        entry.worktree = ev.git_worktree.unwrap_or(false);
+    }
+    // Capture now reports every turn, and the answer is the same every turn once
+    // a session settles. Without this the store would be re-serialized and
+    // written to disk at every turn boundary of every live session.
+    if map.contains_key(&ev.session_id) && entry == previous {
+        return;
+    }
+    map.insert(ev.session_id.clone(), entry);
     if let Ok(v) = serde_json::to_value(&map) {
         store.set(KEY_CAPTURES, v);
         let _ = store.save();
@@ -183,10 +198,14 @@ fn process_event(app: &AppHandle, ev: HookEvent) {
         let mut eng = state.engine.lock_safe();
         eng.apply(&ev)
     };
-    // Persist (or forget) the terminal handle so click-to-focus survives a
-    // Session Signals restart — the capture hook itself only fires on `SessionStart`.
+    // Persist (or forget) what the capture hook reported, so both click-to-focus
+    // and the repo/branch label survive a Session Signals restart — an
+    // already-running session never re-fires `SessionStart`.
     match ev.hook_event_name.as_str() {
-        "BeaconTerminal" if ev.terminal_pid.is_some() => persist_capture(app, &ev),
+        // Only what the engine accepted: a turn-mode report that lost the race
+        // with `SessionEnd` is rejected there (`changed: false`), and must not
+        // re-insert the entry `forget_capture` just deleted.
+        "BeaconTerminal" if outcome.changed => persist_capture(app, &ev),
         "SessionEnd" => forget_capture(app, &ev.session_id),
         _ => {}
     }
@@ -637,6 +656,27 @@ pub fn run() {
                 match install_beacon_hooks(&handle) {
                     Ok(p) => eprintln!("beacon: repaired stale hook auth token in {}", p.display()),
                     Err(e) => eprintln!("beacon: could not repair stale hooks: {e}"),
+                }
+            }
+
+            // Keep the capture script itself current on every launch. The command
+            // hook invokes it by path and the file is re-read each run, so this
+            // alone upgrades the script's contents with no user action. Only the
+            // *wiring* — which events run it — needs a settings.json write, and
+            // that's what `needs_capture_repair` detects: upgrading from a build
+            // that wired capture to `SessionStart` only would otherwise leave
+            // every row without its branch, since the git identity behind the
+            // label now arrives solely through this hook.
+            if hooks::is_installed() {
+                let token = current_token(&handle);
+                let port = current_port(&handle);
+                if capture::write_script(&handle, port, &token).is_some()
+                    && hooks::needs_capture_repair()
+                {
+                    match install_beacon_hooks(&handle) {
+                        Ok(p) => eprintln!("beacon: wired capture hook in {}", p.display()),
+                        Err(e) => eprintln!("beacon: could not wire capture hook: {e}"),
+                    }
                 }
             }
 
