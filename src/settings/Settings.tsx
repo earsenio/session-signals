@@ -387,10 +387,9 @@ export default function Settings() {
             Signals’ own hooks can report state — other local programs are rejected.
           </p>
           <p className="sHookNote">
-            Repo and branch names are resolved by the hook itself, inside your terminal, so
-            Session Signals never needs permission to read your project folders. Sessions that
-            were already running when the hooks last changed show the folder name only, until
-            they restart.
+            Repo and branch names are resolved by the hook itself, inside your terminal, so Session
+            Signals never needs permission to read your project folders. Sessions that were already
+            running when the hooks last changed show the folder name only, until they restart.
           </p>
           <div className="sHookBtns">
             <button className="sBtn" onClick={regenerateToken}>
