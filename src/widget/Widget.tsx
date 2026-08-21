@@ -50,7 +50,9 @@ function rowColor(palette: ThemePalette, s: LiveSession): string {
 }
 
 /// Subscribe to the engine's pushes and tick time-in-state locally between them.
-function useEngineState() {
+/// `ticking` drives the once-a-second age refresh; pass false when no elapsed
+/// time is rendered (the collapsed pill) so the timer stops entirely.
+function useEngineState(ticking: boolean) {
   const [payload, setPayload] = useState<SessionsPayload>({ rollup: "grey", sessions: [] });
   const [baseAt, setBaseAt] = useState<number>(() => Date.now());
   const [now, setNow] = useState<number>(() => Date.now());
@@ -90,10 +92,19 @@ function useEngineState() {
     };
   }, []);
 
+  // The per-second tick exists only to advance the displayed ages, so it runs
+  // only while an age is actually on screen. The collapsed pill renders no
+  // `formatAge` at all, so ticking there re-rendered the whole tree — and forced
+  // a repaint of a transparent, always-on-top window — once a second for nothing.
+  // No need to re-stamp `now` when the tick resumes: `baseAt` is refreshed by
+  // the 2 s reconcile, so a `now` left behind from before the collapse just
+  // clamps `elapsed` to 0 and the row renders the engine's own authoritative
+  // `seconds_in_state` until the next tick a second later.
   useEffect(() => {
+    if (!ticking) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [ticking]);
 
   const elapsed = Math.max(0, Math.floor((now - baseAt) / 1000));
   const sessions = payload.sessions.map((s) => ({
@@ -365,10 +376,10 @@ function EmptyBody({ palette }: { palette: ThemePalette }) {
 }
 
 export default function Widget() {
-  const { rollup, sessions } = useEngineState();
+  const [compact, setCompact] = useState(false);
+  const { rollup, sessions } = useEngineState(!compact);
   const theme = useTheme();
   const palette = theme.palette;
-  const [compact, setCompact] = useState(false);
   const [opacity, setOpacity] = useState(0.95);
   // For the footer status strip; read-only, tracks config-updated so a port
   // change made in Settings shows here without a restart.
