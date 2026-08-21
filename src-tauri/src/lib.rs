@@ -151,6 +151,9 @@ struct AppState {
     /// The active theme's tray palette, pushed from the webview. The tray icon is
     /// drawn from this; persisted so the look survives restarts.
     tray_palette: Mutex<TrayPalette>,
+    /// The last payload actually emitted, so `refresh` can skip pushing an
+    /// identical one. See `refresh` for why the duplicates arise.
+    last_payload: Mutex<Option<SessionsPayload>>,
     notifier: Notifier,
     /// Hook events flow listener → this channel → the `beacon-events` worker.
     /// Keeping the listener thread off the engine/notify work means one
@@ -159,13 +162,22 @@ struct AppState {
 }
 
 /// What the webview receives on every update.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq)]
 struct SessionsPayload {
     rollup: Rollup,
     sessions: Vec<SessionView>,
 }
 
 /// Recompute rollup + snapshot, push to the tray and the webviews.
+///
+/// Deliberately a no-op when nothing the UI shows has changed. `Engine::heartbeat`
+/// reports `changed: true` for every heartbeat-class event (`PostToolUse`,
+/// `SubagentStart`/`Stop`, …) because it did touch `last_seen` — so during one
+/// busy turn this is reached many times a second. Each of those used to re-render
+/// the tray icon and push a fresh payload into every webview, which re-rendered
+/// and repainted a transparent always-on-top window for no visible reason.
+/// Comparing against the last payload collapses that burst; `seconds_in_state`
+/// still ticks, so genuine once-a-second updates get through untouched.
 fn refresh(app: &AppHandle) {
     let state = app.state::<AppState>();
     let payload = {
@@ -175,6 +187,13 @@ fn refresh(app: &AppHandle) {
             sessions: eng.snapshot(),
         }
     };
+    {
+        let mut last = state.last_payload.lock_safe();
+        if last.as_ref() == Some(&payload) {
+            return;
+        }
+        *last = Some(payload.clone());
+    }
     {
         let palette = *state.tray_palette.lock_safe();
         tray::set_rollup(app, payload.rollup, &palette);
@@ -412,8 +431,17 @@ fn set_tray_palette(app: AppHandle, palette: TrayPalette) {
     }
     tray::save_palette(&app, &palette);
     notify::render_icons(&app, &palette);
-    // Repaint the tray with the current rollup in the new palette.
-    refresh(&app);
+    // Repaint the tray with the current rollup in the new palette. This goes
+    // straight to the tray rather than through `refresh`, which returns early
+    // when the session payload is unchanged — and a theme switch changes the
+    // palette, not the sessions, so routing it through `refresh` would leave the
+    // tray on the old colors until something else happened to move.
+    let rollup = {
+        let state = app.state::<AppState>();
+        let eng = state.engine.lock_safe();
+        eng.rollup()
+    };
+    tray::set_rollup(&app, rollup, &palette);
 }
 
 #[tauri::command]
@@ -572,6 +600,7 @@ pub fn run() {
             token: Arc::new(Mutex::new(String::new())),
             // Classic until setup() loads the persisted palette.
             tray_palette: Mutex::new(TrayPalette::default()),
+            last_payload: Mutex::new(None),
             notifier: Notifier::new(),
             events: tx,
         })

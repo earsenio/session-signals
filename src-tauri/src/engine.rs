@@ -193,7 +193,7 @@ pub struct SweepOutcome {
 }
 
 /// A flattened, serializable view of one session for the webview / tray menu.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct SessionView {
     pub session_id: String,
     /// Combined one-line label (`folder (branch)` or `folder`) — used for
