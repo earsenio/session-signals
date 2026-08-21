@@ -175,14 +175,27 @@ body {
 
 /* Soft halo in the theme's *working* color — kept working-colored regardless
    of the row's own state (it signals subagent activity, not the row state). */
+/* The soft edge is baked into a gradient rather than produced by `filter:
+   blur()`. A filter has to be re-rasterized on every frame of the animation
+   below, which pins the main thread at the display's refresh rate for as long as
+   a subagent runs; a gradient is painted once and then only transformed. Sized a
+   little larger than the old 28px disc because the blur used to spread past the
+   element's box and the gradient does not. Only transform/opacity animate, so
+   `will-change` lets this ride on its own compositing layer. */
 .wBusyHalo {
   position: absolute;
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
-  background: var(--state-working);
-  filter: blur(7px);
+  background: radial-gradient(
+    circle closest-side,
+    rgba(var(--state-working-rgb), 1) 0%,
+    rgba(var(--state-working-rgb), 0.72) 34%,
+    rgba(var(--state-working-rgb), 0.26) 60%,
+    rgba(var(--state-working-rgb), 0) 78%
+  );
   opacity: 0.32;
+  will-change: transform, opacity;
   animation: beaconBusyHalo 2.4s ease-in-out infinite;
 }
 
@@ -203,6 +216,9 @@ body {
   height: 6px;
   border-radius: 50%;
   background: var(--state-working);
+  /* Same reason as .wBusyHalo: earn a compositing layer so the pulse costs the
+     main thread nothing while it runs. */
+  will-change: transform, opacity;
   animation: beaconBusyDot 1.8s ease-in-out infinite;
   flex: none;
 }
