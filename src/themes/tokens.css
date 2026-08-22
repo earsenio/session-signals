@@ -76,6 +76,30 @@
   }
 }
 
+/* The breathing ring's host + the ring itself (see StateGlyph). The ring is a
+   DOM element rather than an SVG <circle> so WebKit can give it its own
+   compositing layer — `will-change` is what asks for that. Without the layer the
+   animation runs on the main thread and repaints the whole widget every frame.
+   Sized/colored inline per glyph; only `transform` and `opacity` animate, both
+   of which the compositor can drive without touching the main thread. */
+.glyphWrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.glyphPulse {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border-style: solid;
+  pointer-events: none;
+  will-change: transform, opacity;
+  animation: beaconPulse 2.6s ease-in-out infinite;
+}
+
 /* Subagent activity (Surface 9): the sub-line dot pulses, the glyph halo breathes. */
 @keyframes beaconBusyDot {
   0%,

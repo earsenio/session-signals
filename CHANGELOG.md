@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Session Signals no longer holds ~29% CPU (spread across its three processes)
+  while sitting idle with a working session on screen — measured at ~1-3% after
+  the fix. The widget's breathing ring was drawn as an SVG `<circle>`, and WebKit
+  can't give a non-root SVG child its own compositing layer, so an animation that
+  should have cost nothing instead re-resolved style and repainted the widget on
+  every frame — forever, at up to 120fps, over a transparent always-on-top window
+  that is never occluded and so never throttled. The ring is now a plain element
+  the compositor can drive on its own, and the subagent halo's per-frame
+  `filter: blur()` became a static gradient.
+- The widget's once-a-second age tick no longer runs while collapsed, where no
+  elapsed time is displayed.
+- Heartbeat events (`PostToolUse`, `SubagentStart`/`Stop`) no longer re-render the
+  tray icon and push a fresh payload to every window when nothing visible changed
+  — during a busy turn that fired many times a second.
+
 ## [0.4.1] - 2026-08-20
 
 ### Fixed

@@ -7,6 +7,7 @@ use crate::engine::Rollup;
 use crate::glyph::{render_glyph_rgba, shape_for_rollup};
 use crate::hooks;
 use crate::windows;
+use crate::LockExt;
 use serde::{Deserialize, Serialize};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -24,7 +25,7 @@ const TRAY_SIZE: u32 = 32;
 /// Colors pushed from the active theme. RGB triples (0–255). `rollup` colors
 /// drive the tray; `state` colors let the notifier render matching glyphs from
 /// the same source. Shapes are fixed per state (see `Shape`), not stored here.
-#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct TrayPalette {
     pub red: [u8; 3],
@@ -142,12 +143,29 @@ pub fn build(app: &AppHandle, palette: &TrayPalette) -> tauri::Result<()> {
     Ok(())
 }
 
+/// What the tray currently shows, so an unchanged rollup costs nothing.
+static APPLIED: std::sync::Mutex<Option<(Rollup, TrayPalette)>> = std::sync::Mutex::new(None);
+
 /// Update the tray icon + tooltip to reflect the current rollup, using `palette`.
+///
+/// Skips the work when neither the rollup nor the palette has moved. Callers
+/// reach this on every engine refresh, but the rollup only changes when a
+/// session actually changes color — so the common case was rasterizing a 32×32
+/// signed-distance-field icon and handing it to the OS to redraw the menu bar,
+/// several times a second during a busy turn, to draw the identical dot.
 pub fn set_rollup(app: &AppHandle, rollup: Rollup, palette: &TrayPalette) {
+    // Held across the update so the recorded value can never claim an icon that
+    // wasn't applied — including the early-startup case where the tray doesn't
+    // exist yet and this call is a genuine no-op that must be retried later.
+    let mut applied = APPLIED.lock_safe();
+    if applied.as_ref() == Some(&(rollup, *palette)) {
+        return;
+    }
     if let Some(tray) = app.tray_by_id(&TrayIconId::new(TRAY_ID)) {
         let _ = tray.set_icon(Some(icon_for(palette, rollup)));
         let _ = tray.set_icon_as_template(false);
         let _ = tray.set_tooltip(Some(tooltip_for(rollup)));
+        *applied = Some((rollup, *palette));
     }
 }
 
