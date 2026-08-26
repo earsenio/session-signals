@@ -7,7 +7,7 @@
 //! tray and emitting to the webview. The UI never derives state itself.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,45 @@ pub enum Rollup {
     Grey,
 }
 
+/// One live subagent under a session.
+///
+/// Claude Code gives us the agent's identity and type on `SubagentStart`
+/// (`agent_id`, `agent_type`), but **not** what it was asked to do — that text
+/// only ever appears in the *main* agent's `PreToolUse` for the `Agent` tool.
+/// Verified empirically against Claude Code 2.1.x: `SubagentStart` carries
+/// exactly `agent_id`, `agent_type`, `prompt_id`, `session_id`, `cwd`,
+/// `transcript_path`, and nothing that joins back to that `PreToolUse` —
+/// `agent_id` is not the tool call's `tool_use_id`, and `prompt_id` is shared by
+/// every agent in the turn. Hence `Session::pending_agents` and the FIFO pairing
+/// in the `SubagentStart` arm.
+#[derive(Clone, Debug)]
+struct AgentRun {
+    /// `agent_id` from the hook. Unique per running agent; used to remove the
+    /// right one on `SubagentStop`.
+    id: String,
+    /// e.g. "Explore", "Plan". `None` if the hook omitted it.
+    agent_type: Option<String>,
+    /// The task's short description, paired over from `pending_agents`. `None`
+    /// when no unclaimed description matched (see the pairing caveat there).
+    description: Option<String>,
+    /// When this agent started — anchors its own elapsed timer.
+    started: Instant,
+}
+
+/// A description from `PreToolUse(Agent)` waiting for its `SubagentStart`.
+#[derive(Clone, Debug)]
+struct PendingAgent {
+    /// The `subagent_type` requested in the tool call; matched against the
+    /// `agent_type` reported by `SubagentStart`.
+    subagent_type: Option<String>,
+    description: Option<String>,
+}
+
+/// Cap on unclaimed descriptions. A `PreToolUse(Agent)` whose `SubagentStart`
+/// never arrives (denied by a permission gate, or the turn was interrupted)
+/// would otherwise sit in the queue forever; the oldest is dropped past this.
+const MAX_PENDING_AGENTS: usize = 32;
+
 /// A single tracked Claude Code session.
 #[derive(Clone, Debug)]
 struct Session {
@@ -45,13 +84,23 @@ struct Session {
     /// True once it has gone silent past the stale timeout (display grey,
     /// excluded from rollup) but before the grace drop.
     stale: bool,
-    /// Live subagents fanned out from this session: `SubagentStart` minus
-    /// `SubagentStop`, clamped at ≥ 0. Drives the row's "N agents running"
-    /// sub-line independently of `state`.
-    subagent_count: u32,
-    /// When `subagent_count` last rose from 0 — the anchor for the sub-line's
-    /// ticking elapsed timer. `None` whenever the count is 0.
+    /// Live subagents fanned out from this session, in start order: pushed on
+    /// `SubagentStart`, removed by `agent_id` on `SubagentStop`. Drives the
+    /// row's per-agent sub-lines independently of `state`. Its length is the
+    /// old "N agents running" count — there is no separate counter, so the two
+    /// can never disagree.
+    agents: Vec<AgentRun>,
+    /// Task descriptions from the main agent's `PreToolUse(Agent)` that have not
+    /// yet been claimed by a `SubagentStart`. See `AgentRun::description` for
+    /// why this queue exists at all.
+    pending_agents: VecDeque<PendingAgent>,
+    /// When the agent list last became non-empty — the anchor for the aggregate
+    /// elapsed timer. `None` whenever no agents are running.
     sub_since: Option<Instant>,
+    /// The main agent's turn ended (`Stop`) while subagents were still running,
+    /// so the row is held at `Working` until the last one finishes. Cleared when
+    /// that happens, and whenever a new turn takes ownership of the row.
+    pending_ready: bool,
     /// PID of the terminal *application* hosting this session, captured by the
     /// `SessionStart` command hook (see `capture.rs`). Drives click-to-focus and
     /// focus-aware notifications. `None` until/unless capture resolves it.
@@ -89,6 +138,24 @@ struct Session {
     /// When we last *attempted* to (re)derive `descriptor`. Debounces the
     /// transcript read so we don't re-scan the file on every hook event.
     descriptor_checked_at: Option<Instant>,
+}
+
+/// The part of an `Agent`/`Task` tool call we surface.
+///
+/// **Deliberately has no `prompt` field.** The real `tool_input` is
+/// `{description, prompt, subagent_type}`, and `prompt` is the entire task text
+/// — often the contents of files, or whatever the user just asked for. Omitting
+/// the field means serde drops it during parsing and it is never allocated, let
+/// alone stored or shipped to the webview: the privacy guarantee is structural
+/// rather than a filter somebody has to remember to apply. Don't add it.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+pub struct ToolInput {
+    /// The spawner's own short summary of the task ("Map subagent UI in widget").
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The requested agent type ("Explore", "Plan", ...).
+    #[serde(default)]
+    pub subagent_type: Option<String>,
 }
 
 /// Parsed, transport-agnostic hook event. The listener deserializes the raw
@@ -129,6 +196,10 @@ pub struct HookEvent {
     /// `PostToolUse` arms in `apply`.
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Present on `PreToolUse`/`PostToolUse`. Only parsed for the `Agent`/`Task`
+    /// tool, and only for the two fields on [`ToolInput`].
+    #[serde(default)]
+    pub tool_input: Option<ToolInput>,
     /// Present only on the synthetic `BeaconTerminal` event from the capture
     /// hook: the owning terminal app's pid and name.
     #[serde(default)]
@@ -192,6 +263,19 @@ pub struct SweepOutcome {
     pub went_stale: Vec<(String, String)>,
 }
 
+/// One running subagent, as shown on a widget row's sub-line.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AgentView {
+    pub agent_id: String,
+    /// e.g. "Explore". `None` if the hook didn't report one.
+    pub agent_type: Option<String>,
+    /// What this agent was asked to do. `None` when it couldn't be paired to a
+    /// spawn — the row falls back to showing the type alone.
+    pub description: Option<String>,
+    /// Seconds this agent has been running.
+    pub seconds: u64,
+}
+
 /// A flattened, serializable view of one session for the webview / tray menu.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct SessionView {
@@ -212,9 +296,13 @@ pub struct SessionView {
     /// Seconds the session has been in its current state.
     pub seconds_in_state: u64,
     /// Live subagents running under this session (`SubagentStart` − `SubagentStop`).
+    /// Always equal to `agents.len()`; kept as its own field so the UI can gate
+    /// the halo without walking the list.
     pub subagent_count: u32,
     /// Seconds since the subagent count rose from 0 (0 when none are running).
     pub subagent_seconds: u64,
+    /// One entry per running subagent, in start order.
+    pub agents: Vec<AgentView>,
     /// Whether Session Signals resolved the owning terminal window — gates the widget's
     /// click-to-focus affordance (no handle ⇒ no focus button).
     pub can_focus: bool,
@@ -337,7 +425,15 @@ impl Engine {
                 if is_subagent {
                     self.heartbeat(ev)
                 } else {
-                    self.transition_to(ev, State::Working)
+                    // A new turn owns the row now. Drop any deferred Ready left
+                    // over from the previous turn, or an agent of that turn
+                    // finishing mid-way through this one would yank the session
+                    // to green while it is actively working.
+                    let out = self.transition_to(ev, State::Working);
+                    if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+                        s.pending_ready = false;
+                    }
+                    out
                 }
             }
             // A tool call is starting. Most tools mean the agent is actively
@@ -354,21 +450,36 @@ impl Engine {
                 } else if is_subagent {
                     self.heartbeat(ev)
                 } else {
-                    self.transition_to(ev, State::Working)
+                    // The main agent is spawning a subagent. This is the ONLY
+                    // event that carries what the agent was asked to do, so
+                    // stash it for the `SubagentStart` that follows.
+                    let out = self.transition_to(ev, State::Working);
+                    if is_agent_tool(ev.tool_name.as_deref()) {
+                        self.queue_agent_description(ev);
+                    }
+                    out
                 }
             }
-            // A spawned subagent: bump the live subagent count (the first one
-            // anchors the sub-line's elapsed timer). This does NOT change the
-            // session's state — the main agent's own `PreToolUse` for the Task
-            // tool already moved it to Working; the count drives the independent
-            // "N agents running" sub-line.
+            // A spawned subagent: record it (the first one anchors the
+            // aggregate elapsed timer). This does NOT change the session's
+            // state — the main agent's own `PreToolUse` for the `Agent` tool
+            // already moved it to Working; the list drives the independent
+            // per-agent sub-lines.
             "SubagentStart" => {
                 let out = self.heartbeat(ev);
+                let now = Instant::now();
                 if let Some(s) = self.sessions.get_mut(&ev.session_id) {
-                    if s.subagent_count == 0 {
-                        s.sub_since = Some(Instant::now());
+                    if s.agents.is_empty() {
+                        s.sub_since = Some(now);
                     }
-                    s.subagent_count += 1;
+                    let description =
+                        claim_description(&mut s.pending_agents, ev.agent_type.as_deref());
+                    s.agents.push(AgentRun {
+                        id: ev.agent_id.clone().unwrap_or_default(),
+                        agent_type: ev.agent_type.clone(),
+                        description,
+                        started: now,
+                    });
                 }
                 out
             }
@@ -416,24 +527,55 @@ impl Engine {
             "Stop" | "StopFailure" | "PostCompact" => {
                 if is_subagent {
                     self.heartbeat(ev)
+                } else if self.has_live_agents(&ev.session_id) {
+                    // The main agent's turn ended but its subagents are still
+                    // running — and they run in the background by default, so
+                    // this is the *common* fan-out case, not an edge one.
+                    // Calling the session Ready here would say "finished, your
+                    // turn" (and fire that notification) while the work is
+                    // still going. Hold it at Working; the last `SubagentStop`
+                    // below releases it.
+                    let out = self.transition_to(ev, State::Working);
+                    if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+                        s.pending_ready = true;
+                    }
+                    out
                 } else {
                     self.transition_to(ev, State::Ready)
                 }
             }
-            // A subagent finished: decrement (clamped), and when the last one
-            // leaves, drop the elapsed anchor so the sub-line disappears. Like
-            // `SubagentStart`, this only touches the count — it does NOT move the
-            // session to Ready, which previously flipped a still-working (or
-            // still-blocked) parent to green the instant any subagent stopped.
+            // A subagent finished: drop it from the list (by `agent_id`, which
+            // this event does carry), and when the last one leaves, drop the
+            // elapsed anchor so the sub-lines disappear.
+            //
+            // This still does NOT move a session to Ready on its own — that
+            // previously flipped a still-working (or still-blocked) parent to
+            // green the instant *any* subagent stopped. The one exception is a
+            // Ready deferred by the `Stop` arm above: the main agent already
+            // finished and was only waiting on these agents, so the last one
+            // leaving is exactly the moment the session really is ready.
             "SubagentStop" => {
                 let out = self.heartbeat(ev);
-                if let Some(s) = self.sessions.get_mut(&ev.session_id) {
-                    s.subagent_count = s.subagent_count.saturating_sub(1);
-                    if s.subagent_count == 0 {
-                        s.sub_since = None;
+                let release = match self.sessions.get_mut(&ev.session_id) {
+                    Some(s) => {
+                        remove_agent(&mut s.agents, ev.agent_id.as_deref());
+                        if s.agents.is_empty() {
+                            s.sub_since = None;
+                            // Nothing left to wait for; the queue can only hold
+                            // spawns that never started.
+                            s.pending_agents.clear();
+                            std::mem::take(&mut s.pending_ready)
+                        } else {
+                            false
+                        }
                     }
+                    None => false,
+                };
+                if release {
+                    self.transition_to(ev, State::Ready)
+                } else {
+                    out
                 }
-                out
             }
             // Synthetic event from the terminal-capture hook: record which
             // terminal owns this session. No state change — a session can be in
@@ -469,8 +611,10 @@ impl Engine {
                         last_seen: now,
                         state_since: now,
                         stale: false,
-                        subagent_count: 0,
+                        agents: Vec::new(),
+                        pending_agents: VecDeque::new(),
                         sub_since: None,
+                        pending_ready: false,
                         terminal_pid: None,
                         terminal_app: None,
                         terminal_tty: None,
@@ -640,8 +784,10 @@ impl Engine {
                         last_seen: now,
                         state_since: now,
                         stale: false,
-                        subagent_count: 0,
+                        agents: Vec::new(),
+                        pending_agents: VecDeque::new(),
                         sub_since: None,
+                        pending_ready: false,
                         terminal_pid: cap.pid,
                         terminal_app: cap.app,
                         terminal_tty: cap.tty,
@@ -672,13 +818,40 @@ impl Engine {
         }
     }
 
-    /// Clear a session's live subagent count + elapsed anchor. Used on
-    /// `SessionStart` so a (re)started session never carries a stale sub-line.
-    /// A no-op if the session isn't tracked yet.
+    /// Clear a session's live subagents, unclaimed spawns, elapsed anchor and
+    /// any deferred Ready. Used on `SessionStart` so a (re)started session never
+    /// carries a stale sub-line. A no-op if the session isn't tracked yet.
     fn reset_subagents(&mut self, id: &str) {
         if let Some(s) = self.sessions.get_mut(id) {
-            s.subagent_count = 0;
+            s.agents.clear();
+            s.pending_agents.clear();
             s.sub_since = None;
+            s.pending_ready = false;
+        }
+    }
+
+    /// Does this session have at least one subagent still running?
+    fn has_live_agents(&self, id: &str) -> bool {
+        self.sessions.get(id).is_some_and(|s| !s.agents.is_empty())
+    }
+
+    /// Stash the description from a main-agent `PreToolUse(Agent)` until the
+    /// matching `SubagentStart` arrives. Bounded — see `MAX_PENDING_AGENTS`.
+    fn queue_agent_description(&mut self, ev: &HookEvent) {
+        let Some(input) = ev.tool_input.as_ref() else {
+            return;
+        };
+        if input.description.is_none() && input.subagent_type.is_none() {
+            return;
+        }
+        if let Some(s) = self.sessions.get_mut(&ev.session_id) {
+            if s.pending_agents.len() >= MAX_PENDING_AGENTS {
+                s.pending_agents.pop_front();
+            }
+            s.pending_agents.push_back(PendingAgent {
+                subagent_type: input.subagent_type.clone(),
+                description: input.description.clone(),
+            });
         }
     }
 
@@ -802,8 +975,10 @@ impl Engine {
                     // asserting live subagents — the matching SubagentStop may simply
                     // never have arrived. Clear the count so a greyed row doesn't read
                     // "idle · 1 agent running".
-                    s.subagent_count = 0;
+                    s.agents.clear();
+                    s.pending_agents.clear();
                     s.sub_since = None;
+                    s.pending_ready = false;
                 }
                 s.stale = should_be_stale;
                 changed = true;
@@ -865,11 +1040,21 @@ impl Engine {
                     state: s.state,
                     stale: s.stale,
                     seconds_in_state: now.duration_since(s.state_since).as_secs(),
-                    subagent_count: s.subagent_count,
+                    subagent_count: s.agents.len() as u32,
                     subagent_seconds: s
                         .sub_since
                         .map(|t| now.duration_since(t).as_secs())
                         .unwrap_or(0),
+                    agents: s
+                        .agents
+                        .iter()
+                        .map(|a| AgentView {
+                            agent_id: a.id.clone(),
+                            agent_type: a.agent_type.clone(),
+                            description: a.description.clone(),
+                            seconds: now.duration_since(a.started).as_secs(),
+                        })
+                        .collect(),
                     can_focus: s.terminal_pid.is_some(),
                     descriptor: s.descriptor.clone(),
                 }
@@ -878,6 +1063,51 @@ impl Engine {
         // Stable, useful ordering: live before stale, then by label.
         views.sort_by(|a, b| a.stale.cmp(&b.stale).then_with(|| a.label.cmp(&b.label)));
         views
+    }
+}
+
+/// Is this tool call spawning a subagent? Claude Code 2.1.x names the tool
+/// `Agent`; older versions named it `Task`. Both are accepted so the sub-line
+/// keeps working across versions.
+fn is_agent_tool(tool_name: Option<&str>) -> bool {
+    matches!(tool_name, Some("Agent") | Some("Task"))
+}
+
+/// Take the description for a starting subagent out of the pending queue.
+///
+/// Preference order: the oldest unclaimed spawn whose requested `subagent_type`
+/// matches the type the hook reports, else the oldest unclaimed spawn of any
+/// type. Matching on type first is what keeps a mixed fan-out (an Explore and a
+/// Plan dispatched together) labelled correctly no matter which one starts
+/// first; within a single type, starts are observed in dispatch order, so FIFO
+/// is right.
+///
+/// This is a correlation heuristic, not an identity join — Claude Code exposes
+/// no key linking a `PreToolUse` to the `SubagentStart` it caused (see
+/// [`AgentRun`]). A mismatch mislabels a sub-line; it can't corrupt state.
+fn claim_description(
+    pending: &mut VecDeque<PendingAgent>,
+    agent_type: Option<&str>,
+) -> Option<String> {
+    let idx = agent_type
+        .and_then(|t| {
+            pending
+                .iter()
+                .position(|p| p.subagent_type.as_deref() == Some(t))
+        })
+        .or(if pending.is_empty() { None } else { Some(0) })?;
+    pending.remove(idx).and_then(|p| p.description)
+}
+
+/// Remove a finished subagent. Matches on `agent_id` — which `SubagentStop`
+/// does carry — falling back to the oldest entry if the id is missing or
+/// unknown, so a malformed stop still can't strand a phantom agent on the row.
+fn remove_agent(agents: &mut Vec<AgentRun>, agent_id: Option<&str>) {
+    let idx = agent_id
+        .and_then(|id| agents.iter().position(|a| a.id == id))
+        .unwrap_or(0);
+    if idx < agents.len() {
+        agents.remove(idx);
     }
 }
 
@@ -1886,5 +2116,295 @@ mod tests {
         assert!(!out.changed, "nothing to sweep");
         assert!(out.went_stale.is_empty());
         assert_eq!(e.rollup(), Rollup::Grey);
+    }
+
+    // ---- Per-agent identity + descriptions -----------------------------
+
+    /// A main-agent `PreToolUse(Agent)` carrying the task description, as
+    /// Claude Code actually sends it.
+    fn spawn_ev(sid: &str, agent_type: &str, description: &str) -> HookEvent {
+        HookEvent {
+            tool_input: Some(ToolInput {
+                description: Some(description.to_string()),
+                subagent_type: Some(agent_type.to_string()),
+            }),
+            ..tool_ev("PreToolUse", sid, "Agent")
+        }
+    }
+
+    /// A subagent lifecycle event for a specific agent id + type.
+    fn agent_ev(name: &str, sid: &str, id: &str, agent_type: &str) -> HookEvent {
+        HookEvent {
+            agent_id: Some(id.to_string()),
+            agent_type: Some(agent_type.to_string()),
+            ..ev(name, sid)
+        }
+    }
+
+    fn agents_of(e: &Engine, sid: &str) -> Vec<AgentView> {
+        e.snapshot()
+            .into_iter()
+            .find(|v| v.session_id == sid)
+            .map(|v| v.agents)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn subagent_start_records_type_and_description() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "Map subagent UI in widget"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_id, "a1");
+        assert_eq!(agents[0].agent_type.as_deref(), Some("Explore"));
+        assert_eq!(
+            agents[0].description.as_deref(),
+            Some("Map subagent UI in widget")
+        );
+        assert_eq!(sub_count(&e, "s1"), 1, "count still tracks the list");
+    }
+
+    #[test]
+    fn parallel_same_type_agents_pair_in_dispatch_order() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        // Both spawns are observed before either agent starts — the real
+        // ordering for a fan-out dispatched in one message.
+        e.apply(&spawn_ev("s1", "Explore", "alpha"));
+        e.apply(&spawn_ev("s1", "Explore", "bravo"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].description.as_deref(), Some("alpha"));
+        assert_eq!(agents[1].description.as_deref(), Some("bravo"));
+    }
+
+    #[test]
+    fn mixed_type_fan_out_matches_on_type_not_arrival_order() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "explore work"));
+        e.apply(&spawn_ev("s1", "Plan", "plan work"));
+        // The Plan agent starts first — type matching must beat FIFO here.
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Plan"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents[0].description.as_deref(), Some("plan work"));
+        assert_eq!(agents[1].description.as_deref(), Some("explore work"));
+    }
+
+    #[test]
+    fn agent_without_a_matching_spawn_has_no_description() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        // No PreToolUse seen (e.g. Session Signals started mid-turn).
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].description, None);
+        assert_eq!(agents[0].agent_type.as_deref(), Some("Explore"));
+    }
+
+    #[test]
+    fn subagent_stop_removes_the_agent_that_stopped() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "alpha"));
+        e.apply(&spawn_ev("s1", "Explore", "bravo"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
+        // The *first* one finishes; the survivor must be bravo, not alpha.
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_id, "a2");
+        assert_eq!(agents[0].description.as_deref(), Some("bravo"));
+    }
+
+    #[test]
+    fn legacy_task_tool_name_still_captures_descriptions() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        e.apply(&HookEvent {
+            tool_input: Some(ToolInput {
+                description: Some("legacy spawn".to_string()),
+                subagent_type: Some("Explore".to_string()),
+            }),
+            ..tool_ev("PreToolUse", "s1", "Task")
+        });
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        assert_eq!(
+            agents_of(&e, "s1")[0].description.as_deref(),
+            Some("legacy spawn")
+        );
+    }
+
+    #[test]
+    fn a_non_agent_tool_call_queues_nothing() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        // A Bash call carries no agent tool_input; if it somehow did, it must
+        // not end up labelling a later agent.
+        e.apply(&HookEvent {
+            tool_input: Some(ToolInput {
+                description: Some("not an agent".to_string()),
+                subagent_type: Some("Explore".to_string()),
+            }),
+            ..tool_ev("PreToolUse", "s1", "Bash")
+        });
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        assert_eq!(agents_of(&e, "s1")[0].description, None);
+    }
+
+    // ---- Stop is deferred until the agents finish ----------------------
+
+    #[test]
+    fn stop_with_agents_running_stays_working() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "alpha"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+
+        let out = e.apply(&ev("Stop", "s1"));
+        assert_eq!(
+            state_of(&e, "s1"),
+            State::Working,
+            "agents still running — the turn is not over"
+        );
+        assert!(
+            out.transition.is_none(),
+            "already Working; no transition, so no notification"
+        );
+        assert_eq!(e.rollup(), Rollup::Orange);
+    }
+
+    #[test]
+    fn last_subagent_stop_after_stop_releases_ready() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "alpha"));
+        e.apply(&spawn_ev("s1", "Explore", "bravo"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
+        e.apply(&ev("Stop", "s1"));
+
+        // First agent leaving is not enough.
+        let out = e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::Working);
+        assert!(out.transition.is_none());
+
+        // The last one releases the deferred Ready — and this is the transition
+        // that fires the "finished, your turn" notification.
+        let out = e.apply(&agent_ev("SubagentStop", "s1", "a2", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::Ready);
+        let t = out.transition.expect("Working → Ready transition");
+        assert_eq!(t.from, Some(State::Working));
+        assert_eq!(t.to, State::Ready);
+        assert_eq!(sub_count(&e, "s1"), 0);
+    }
+
+    #[test]
+    fn stop_with_no_agents_is_ready_immediately() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        let out = e.apply(&ev("Stop", "s1"));
+        assert_eq!(state_of(&e, "s1"), State::Ready);
+        assert!(
+            out.transition.is_some(),
+            "unchanged fast path still notifies"
+        );
+    }
+
+    #[test]
+    fn a_new_turn_cancels_a_deferred_ready() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "alpha"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&ev("Stop", "s1"));
+
+        // The user sends a new prompt while the old turn's agent is still going.
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        // That agent finishing must NOT yank the live turn to green.
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::Working);
+    }
+
+    #[test]
+    fn a_subagent_stop_never_clears_a_block_on_its_own() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        // The subagent hits a permission gate: the parent goes red.
+        e.apply(&HookEvent {
+            notification_type: Some("permission_prompt".to_string()),
+            ..agent_ev("Notification", "s1", "a1", "Explore")
+        });
+        assert_eq!(state_of(&e, "s1"), State::NeedsYou);
+
+        // It then stops. With no deferred Ready pending, red must survive.
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::NeedsYou);
+    }
+
+    #[test]
+    fn stale_sweep_clears_agents_and_deferred_ready() {
+        let mut e = Engine::new(Duration::from_millis(1), Duration::from_secs(600));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "alpha"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&ev("Stop", "s1"));
+        std::thread::sleep(Duration::from_millis(5));
+        e.sweep();
+
+        assert!(
+            agents_of(&e, "s1").is_empty(),
+            "greyed row asserts no agents"
+        );
+        assert_eq!(sub_count(&e, "s1"), 0);
+        // The deferred Ready went with them: a straggling stop can't resurrect it.
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::Working);
+    }
+
+    #[test]
+    fn session_start_clears_agents_and_pending_spawns() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "never started"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&ev("SessionStart", "s1"));
+
+        assert!(agents_of(&e, "s1").is_empty());
+        // The unclaimed spawn is gone too, so it can't label an agent from the
+        // new session's first fan-out.
+        e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
+        assert_eq!(agents_of(&e, "s1")[0].description, None);
+    }
+
+    #[test]
+    fn unclaimed_spawns_are_bounded() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("SessionStart", "s1"));
+        // Far more spawns than ever start — the queue must not grow forever.
+        for i in 0..(MAX_PENDING_AGENTS * 3) {
+            e.apply(&spawn_ev("s1", "Explore", &format!("task {i}")));
+        }
+        let pending = e.sessions.get("s1").map(|s| s.pending_agents.len());
+        assert_eq!(pending, Some(MAX_PENDING_AGENTS));
+        // Oldest dropped, so the next agent gets a recent description.
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        assert_eq!(
+            agents_of(&e, "s1")[0].description.as_deref(),
+            Some(&*format!("task {}", MAX_PENDING_AGENTS * 2))
+        );
     }
 }
