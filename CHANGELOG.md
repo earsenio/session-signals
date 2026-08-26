@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Widget rows now show **what** each subagent is doing, not just how many are
+  running. Every live agent gets its own line: its type (`Explore`, `Plan`, …),
+  the task it was given, and its own elapsed timer. Long tasks truncate with the
+  full text on hover.
+
 ### Fixed
+- A session no longer turns green while its agents are still working. Agents run
+  in the background by default, so the ordinary case was: the main turn ends,
+  the row goes **Ready**, and Session Signals announces "Finished — your turn"
+  with the work still in flight. The row now stays **Working** from the end of
+  the turn until the last agent finishes, and the notification fires at that
+  moment instead.
 - Session Signals no longer holds ~29% CPU (spread across its three processes)
   while sitting idle with a working session on screen — measured at ~1-3% after
   the fix. The widget's breathing ring was drawn as an SVG `<circle>`, and WebKit

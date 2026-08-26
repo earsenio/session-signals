@@ -199,12 +199,25 @@ body {
   animation: beaconBusyHalo 2.4s ease-in-out infinite;
 }
 
-/* --- Subagent activity sub-line (indented under the title) --- */
+/* --- Subagent activity sub-lines (indented under the title) --- */
+/* One row per running agent, stacked. The row's own height is whatever this
+   comes to; the window re-fits itself because Widget.tsx observes each <li>
+   individually, so nothing here needs a fixed or reserved height. */
+.wSubList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .wSubline {
   margin-left: 33px;
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Children must be allowed to shrink for the label's ellipsis to engage —
+     a flex item's default min-width:auto would let the text force the row
+     wider than the 320px window instead of truncating. */
+  min-width: 0;
   background: rgba(var(--state-working-rgb), 0.09);
   border: 1px solid rgba(var(--state-working-rgb), 0.2);
   border-radius: 8px;
@@ -223,9 +236,28 @@ body {
   flex: none;
 }
 
+/* The agent's type ("Explore", "Plan"). Fixed-width-ish and never truncated —
+   it's the part that stays readable when the description is squeezed. */
+.wSubType {
+  font: 600 10px var(--font-mono);
+  letter-spacing: 0.03em;
+  color: #e2c79a;
+  background: rgba(var(--state-working-rgb), 0.16);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex: none;
+}
+
+/* What the agent is doing. Takes the leftover width and ellipsizes; the full
+   text is on the element's title attribute. */
 .wSubLabel {
   font: 500 11px var(--font-sans);
   color: #e2c79a;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .wSubTimer {

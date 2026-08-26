@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ROLLUP_LABEL,
+  type AgentView,
   type Rollup,
   type SessionState,
   type SessionsPayload,
@@ -110,14 +111,28 @@ function useEngineState(ticking: boolean) {
   const sessions = payload.sessions.map((s) => ({
     ...s,
     liveSeconds: s.seconds_in_state + elapsed,
-    // The subagent sub-line's ticking timer reuses the SAME local tick — no
+    // The subagent sub-lines' ticking timers reuse the SAME local tick — no
     // second timer. Only meaningful while at least one subagent is running.
     subLiveSeconds: s.subagent_count > 0 ? s.subagent_seconds + elapsed : 0,
+    agentsLive: s.agents.map((a) => ({ ...a, liveSeconds: a.seconds + elapsed })),
   }));
   return { rollup: payload.rollup, sessions };
 }
 
-type LiveSession = SessionView & { liveSeconds: number; subLiveSeconds: number };
+type LiveAgent = AgentView & { liveSeconds: number };
+type LiveSession = SessionView & {
+  liveSeconds: number;
+  subLiveSeconds: number;
+  agentsLive: LiveAgent[];
+};
+
+/// What a sub-line says an agent is doing. The engine pairs each agent to the
+/// description of the call that spawned it, but that pairing can come up empty
+/// (Session Signals started mid-turn, or the spawn was never observed) — so fall
+/// back to the bare type, and to a generic word if even that is missing.
+function agentLabel(agent: LiveAgent): string {
+  return agent.description ?? agent.agent_type ?? "agent";
+}
 
 /// Short header summary derived from the rollup + live sessions (presentation).
 function headerStatus(rollup: Rollup, sessions: LiveSession[]): string {
@@ -139,11 +154,11 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
   const color = rowColor(palette, session);
   const stateText = session.stale ? "No response" : ROW_STATE_TEXT[session.state];
   // Subagent activity is independent of the row's own state: a session can be
-  // red (Needs you) or green (Ready) while subagents still run underneath.
-  const busy = session.subagent_count > 0;
-  const subLabel = `${session.subagent_count} ${
-    session.subagent_count === 1 ? "agent" : "agents"
-  } running`;
+  // red (Needs you) while subagents still run underneath. (It can no longer be
+  // green with agents running — the engine holds the row at Working until the
+  // last one finishes.)
+  const agents = session.agentsLive;
+  const busy = agents.length > 0;
 
   // Click-to-focus: only offered when Session Signals resolved the owning terminal
   // window (can_focus). A click raises it; if the window vanished since capture,
@@ -237,13 +252,24 @@ function ExpandedRow({ session, palette }: { session: LiveSession; palette: Them
           )
         )}
       </div>
-      {/* Quiet sub-line: pulsing dot + count + ticking elapsed. Rendered only
-          while busy → no reserved height when the count is 0 (row reflows). */}
+      {/* One quiet sub-line per running agent: pulsing dot + type + what it was
+          asked to do + its own ticking elapsed. Rendered only while busy → no
+          reserved height when nothing is running (the row reflows, and the
+          window re-fits via the per-row ResizeObserver below). Keyed by
+          agent_id so a finishing agent doesn't renumber its siblings. */}
       {busy && (
-        <div className="wSubline">
-          <span className="wSubDot" />
-          <span className="wSubLabel">{subLabel}</span>
-          <span className="wSubTimer">{formatAge(session.subLiveSeconds)}</span>
+        <div className="wSubList">
+          {agents.map((agent) => (
+            <div className="wSubline" key={agent.agent_id}>
+              <span className="wSubDot" />
+              {agent.agent_type && <span className="wSubType">{agent.agent_type}</span>}
+              {/* title= so the full task survives the 320px ellipsis. */}
+              <span className="wSubLabel" title={agentLabel(agent)}>
+                {agentLabel(agent)}
+              </span>
+              <span className="wSubTimer">{formatAge(agent.liveSeconds)}</span>
+            </div>
+          ))}
         </div>
       )}
     </li>

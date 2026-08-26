@@ -129,6 +129,14 @@ where
                     .with_status_code(200)
                     .with_header(header),
             );
+            // Raw-body dump for discovering hook payload shapes. Claude Code's
+            // hook schema is not published field-by-field and the CLI ships as a
+            // compiled binary, so the only way to learn what an event actually
+            // carries is to look at one — this is how `agent_id` was found. Off
+            // unless BEACON_DEBUG_HOOKS is set; kept because we keep needing it.
+            if std::env::var_os("BEACON_DEBUG_HOOKS").is_some() {
+                eprintln!("[beacon:raw] {body}");
+            }
             // Parse leniently. Unknown fields ignored; bad JSON dropped.
             match serde_json::from_str::<HookEvent>(&body) {
                 Ok(ev) if !ev.hook_event_name.is_empty() => on_event(ev),
