@@ -461,7 +461,13 @@ fn hooks_installed() -> bool {
 
 #[tauri::command]
 fn hook_block(app: AppHandle) -> String {
-    hooks::hook_block_string(current_port(&app), &current_token(&app))
+    let port = current_port(&app);
+    let token = current_token(&app);
+    // Ensure the capture script exists before emitting a path to it. Users who
+    // only paste the block never press Install, so the script would otherwise
+    // be missing from the app-data dir.
+    let capture_cmd = capture::write_script(&app, port, &token);
+    hooks::hook_block_string(port, &token, capture_cmd.as_deref())
 }
 
 /// Mint a fresh listener token, swap it into the live listener, and — if hooks
@@ -688,20 +694,16 @@ pub fn run() {
                 }
             }
 
-            // Keep the capture script itself current on every launch. The command
-            // hook invokes it by path and the file is re-read each run, so this
-            // alone upgrades the script's contents with no user action. Only the
-            // *wiring* — which events run it — needs a settings.json write, and
-            // that's what `needs_capture_repair` detects: upgrading from a build
-            // that wired capture to `SessionStart` only would otherwise leave
-            // every row without its branch, since the git identity behind the
-            // label now arrives solely through this hook.
-            if hooks::is_installed() {
+            // Always keep the capture script on disk (even when hooks are not
+            // installed). The copy-paste hook block references it by absolute
+            // path, so a manual installer needs the file before they ever press
+            // Install. When hooks *are* installed, also repair missing capture
+            // wiring in settings.json (upgrade path from SessionStart-only).
+            {
                 let token = current_token(&handle);
                 let port = current_port(&handle);
-                if capture::write_script(&handle, port, &token).is_some()
-                    && hooks::needs_capture_repair()
-                {
+                let wrote = capture::write_script(&handle, port, &token).is_some();
+                if wrote && hooks::is_installed() && hooks::needs_capture_repair() {
                     match install_beacon_hooks(&handle) {
                         Ok(p) => eprintln!("beacon: wired capture hook in {}", p.display()),
                         Err(e) => eprintln!("beacon: could not wire capture hook: {e}"),

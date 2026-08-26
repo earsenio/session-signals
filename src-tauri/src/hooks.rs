@@ -74,17 +74,27 @@ fn our_group(port: u16, token: &str) -> Value {
 
 /// The full `{ "hooks": { ... } }` block Session Signals installs — used both for the
 /// copy-paste fallback and as the source of truth for the merge.
-pub fn hook_block_value(port: u16, token: &str) -> Value {
+///
+/// When `capture_cmd` is `Some`, the command capture hook is included on every
+/// event in [`crate::capture::CAPTURE_EVENTS`] so a manual paste matches what
+/// [`install`] writes (repo/branch labels + click-to-focus).
+pub fn hook_block_value(port: u16, token: &str, capture_cmd: Option<&str>) -> Value {
     let mut hooks = Map::new();
     for ev in EVENTS {
-        hooks.insert(ev.to_string(), Value::Array(vec![our_group(port, token)]));
+        let mut groups = vec![our_group(port, token)];
+        if crate::capture::CAPTURE_EVENTS.contains(ev) {
+            if let Some(cmd) = capture_cmd {
+                groups.push(capture_group(&crate::capture::command_for_event(cmd, ev)));
+            }
+        }
+        hooks.insert(ev.to_string(), Value::Array(groups));
     }
     json!({ "hooks": hooks })
 }
 
 /// Pretty-printed copy-paste string of the hook block.
-pub fn hook_block_string(port: u16, token: &str) -> String {
-    serde_json::to_string_pretty(&hook_block_value(port, token))
+pub fn hook_block_string(port: u16, token: &str, capture_cmd: Option<&str>) -> String {
+    serde_json::to_string_pretty(&hook_block_value(port, token, capture_cmd))
         .unwrap_or_else(|_| "{}".to_string())
 }
 
@@ -615,7 +625,7 @@ mod tests {
 
     #[test]
     fn block_string_has_all_events() {
-        let s = hook_block_string(4317, "secret-tok");
+        let s = hook_block_string(4317, "secret-tok", Some("sh '/x/beacon-capture.sh'"));
         for ev in EVENTS {
             assert!(s.contains(ev), "missing {ev}");
         }
@@ -623,5 +633,32 @@ mod tests {
         // The copy-paste fallback carries the token too.
         assert!(s.contains("secret-tok"));
         assert!(s.contains(crate::token::HEADER));
+    }
+
+    #[test]
+    fn hook_block_includes_capture_when_cmd_provided() {
+        let v = hook_block_value(4317, "tok", Some("sh '/x/beacon-capture.sh'"));
+        let ss = v["hooks"]["SessionStart"].as_array().unwrap();
+        assert!(
+            ss.iter().any(|g| {
+                g["hooks"].as_array().unwrap().iter().any(|h| {
+                    h.get("type").and_then(Value::as_str) == Some("command")
+                        && h.get("command")
+                            .and_then(Value::as_str)
+                            .is_some_and(|c| c.contains(crate::capture::MARKER))
+                })
+            }),
+            "copy-paste block must include capture command hook on SessionStart"
+        );
+        // Without a capture cmd the block stays http-only (legacy path).
+        let http_only = hook_block_value(4317, "tok", None);
+        let ss = http_only["hooks"]["SessionStart"].as_array().unwrap();
+        assert!(ss.iter().all(|g| {
+            g["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|h| h.get("type").and_then(Value::as_str) != Some("command"))
+        }));
     }
 }
