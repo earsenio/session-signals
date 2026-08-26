@@ -1114,13 +1114,25 @@ fn claim_description(
     pending.remove(idx).and_then(|p| p.description)
 }
 
-/// Remove a finished subagent. Matches on `agent_id` — which `SubagentStop`
-/// does carry — falling back to the oldest entry if the id is missing or
-/// unknown, so a malformed stop still can't strand a phantom agent on the row.
+/// Remove a finished subagent, matching on `agent_id` — which `SubagentStop`
+/// always carries (verified on 2.1.x).
+///
+/// A stop naming an agent we aren't tracking is **ignored**, not applied to
+/// whichever agent happens to be oldest. Those stragglers are real: an agent
+/// that started before Session Signals did (or before a restart) still reports
+/// when it finishes, and treating that as "some agent finished" evicts a live
+/// one — which, once the main turn has ended, also releases its deferred Ready
+/// early and turns the row green with work still running. Observed exactly that
+/// way in a live capture before this was tightened.
+///
+/// An agent whose own stop never arrives is not stranded: the stale sweep
+/// clears the list when the session goes silent.
 fn remove_agent(agents: &mut Vec<AgentRun>, agent_id: Option<&str>) -> Option<AgentRun> {
-    let idx = agent_id
-        .and_then(|id| agents.iter().position(|a| a.id == id))
-        .unwrap_or(0);
+    let idx = match agent_id {
+        Some(id) => agents.iter().position(|a| a.id == id)?,
+        // No id at all shouldn't happen; drop the oldest rather than leak.
+        None => 0,
+    };
     (idx < agents.len()).then(|| agents.remove(idx))
 }
 
@@ -2429,6 +2441,41 @@ mod tests {
         // new session's first fan-out.
         e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
         assert_eq!(agents_of(&e, "s1")[0].description, None);
+    }
+
+    #[test]
+    fn a_stop_for_an_untracked_agent_is_ignored() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "the live one"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+
+        // A straggler from an agent that started before we were watching.
+        e.apply(&agent_ev("SubagentStop", "s1", "ghost", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 1, "the live agent must survive");
+        assert_eq!(agents[0].agent_id, "a1");
+    }
+
+    #[test]
+    fn a_straggler_stop_does_not_release_a_deferred_ready() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "the live one"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&ev("Stop", "s1"));
+        assert_eq!(state_of(&e, "s1"), State::Working);
+
+        // This is the regression: an unknown id used to evict the live agent,
+        // empty the list, and flip the row green with the work still running.
+        let out = e.apply(&agent_ev("SubagentStop", "s1", "ghost", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::Working);
+        assert!(out.transition.is_none());
+
+        // The real stop still releases it.
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        assert_eq!(state_of(&e, "s1"), State::Ready);
     }
 
     #[test]
