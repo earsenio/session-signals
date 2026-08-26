@@ -260,6 +260,38 @@ fn command_for(path: &std::path::Path) -> String {
     format!("sh '{}'", path.display())
 }
 
+/// The command-hook string for an *already written* capture script, or `None`
+/// when the script isn't on disk.
+///
+/// This is the read-only counterpart to [`write_script`], for callers that only
+/// need to describe the hook rather than (re)create it — notably the copy-paste
+/// block, which is a getter and must not have side effects. Startup writes the
+/// script unconditionally, so by the time any UI asks, it is there.
+pub fn existing_command(app: &AppHandle) -> Option<String> {
+    existing_command_at(&script_path(app).ok()?)
+}
+
+/// Path-based half of [`existing_command`], so it can be tested without an app.
+fn existing_command_at(path: &std::path::Path) -> Option<String> {
+    path.exists().then(|| command_for(path))
+}
+
+/// Delete the capture script. Part of a clean uninstall: the file embeds the
+/// listener token, so removing our hooks from `settings.json` while leaving it
+/// behind would be a half-uninstall. Returns whether a file was removed;
+/// "wasn't there" is success, not failure.
+pub fn remove_script(app: &AppHandle) -> bool {
+    match script_path(app) {
+        Ok(path) => remove_script_at(&path),
+        Err(_) => false,
+    }
+}
+
+/// Path-based half of [`remove_script`], so it can be tested without an app.
+fn remove_script_at(path: &std::path::Path) -> bool {
+    std::fs::remove_file(path).is_ok()
+}
+
 /// (Re)write the capture script with the current port + token and return the
 /// command-hook string to register for `SessionStart`. Best-effort: returns
 /// `None` if the script can't be written (the rest of the install still
@@ -632,6 +664,31 @@ mod tests {
         let v = run_capture(&dir, odd.to_str().unwrap(), None);
         assert_eq!(v["session_id"], "sess-1");
         assert_eq!(v["capture_mode"], "full");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The copy-paste block must describe the script only when it is really
+    /// there — `hook_block` never creates it, so a missing file has to produce
+    /// an http-only block rather than a hook pointing at nothing.
+    #[test]
+    fn existing_command_reflects_whether_the_script_is_on_disk() {
+        let dir = std::env::temp_dir().join(format!("beacon-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SCRIPT_NAME);
+
+        assert_eq!(existing_command_at(&path), None, "absent → no command");
+
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        let cmd = existing_command_at(&path).expect("present → a command");
+        assert!(cmd.contains(MARKER), "command names the capture script");
+
+        // A clean uninstall takes the token-bearing file with it, and the block
+        // goes back to http-only.
+        assert!(remove_script_at(&path));
+        assert_eq!(existing_command_at(&path), None);
+        // Removing what isn't there is not an error worth surfacing.
+        assert!(!remove_script_at(&path));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
