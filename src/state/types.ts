@@ -5,6 +5,19 @@ export type SessionState = "needs_you" | "working" | "ready";
 
 export type Rollup = "red" | "orange" | "green" | "grey";
 
+/// One running subagent under a session, as shown on a widget row's sub-line.
+export interface AgentView {
+  agent_id: string;
+  /// The agent's type (e.g. "Explore"). `null` if the hook didn't report one.
+  agent_type: string | null;
+  /// What this agent was asked to do — the spawning call's own short summary.
+  /// `null` when it couldn't be paired to a spawn; the row then shows the type
+  /// alone. Never contains the agent's prompt (see `ToolInput` in engine.rs).
+  description: string | null;
+  /// Seconds this agent has been running.
+  seconds: number;
+}
+
 export interface SessionView {
   session_id: string;
   /// Combined one-line label ("folder (branch)" or "folder") — for plain-text
@@ -21,9 +34,13 @@ export interface SessionView {
   stale: boolean;
   seconds_in_state: number;
   /// Live subagents running under this session (SubagentStart − SubagentStop).
+  /// Always equal to `agents.length`; kept separate so the UI can gate the halo
+  /// without walking the list.
   subagent_count: number;
   /// Seconds since the subagent count rose from 0 (0 when none are running).
   subagent_seconds: number;
+  /// One entry per running subagent, in start order.
+  agents: AgentView[];
   /// Whether Session Signals resolved the owning terminal window — gates the row's
   /// click-to-focus affordance.
   can_focus: boolean;
