@@ -94,6 +94,12 @@ struct Session {
     /// yet been claimed by a `SubagentStart`. See `AgentRun::description` for
     /// why this queue exists at all.
     pending_agents: VecDeque<PendingAgent>,
+    /// Descriptions of agents that have already run, keyed by `agent_id`.
+    /// A resumed agent — one messaged after it finished, or waking to report a
+    /// background task — emits a *second* `SubagentStart` with no fresh
+    /// `PreToolUse` behind it (observed live). Without this it would come back
+    /// as an unlabelled row. Bounded like `pending_agents`.
+    known_agents: VecDeque<(String, Option<String>)>,
     /// When the agent list last became non-empty — the anchor for the aggregate
     /// elapsed timer. `None` whenever no agents are running.
     sub_since: Option<Instant>,
@@ -472,8 +478,12 @@ impl Engine {
                     if s.agents.is_empty() {
                         s.sub_since = Some(now);
                     }
-                    let description =
-                        claim_description(&mut s.pending_agents, ev.agent_type.as_deref());
+                    // A resumed agent keeps the label it had the first time
+                    // round; only a genuinely new one consumes a pending spawn.
+                    let description = recall_description(&s.known_agents, ev.agent_id.as_deref())
+                        .unwrap_or_else(|| {
+                            claim_description(&mut s.pending_agents, ev.agent_type.as_deref())
+                        });
                     s.agents.push(AgentRun {
                         id: ev.agent_id.clone().unwrap_or_default(),
                         agent_type: ev.agent_type.clone(),
@@ -558,7 +568,9 @@ impl Engine {
                 let out = self.heartbeat(ev);
                 let release = match self.sessions.get_mut(&ev.session_id) {
                     Some(s) => {
-                        remove_agent(&mut s.agents, ev.agent_id.as_deref());
+                        if let Some(done) = remove_agent(&mut s.agents, ev.agent_id.as_deref()) {
+                            remember_agent(&mut s.known_agents, done);
+                        }
                         if s.agents.is_empty() {
                             s.sub_since = None;
                             // Nothing left to wait for; the queue can only hold
@@ -613,6 +625,7 @@ impl Engine {
                         stale: false,
                         agents: Vec::new(),
                         pending_agents: VecDeque::new(),
+                        known_agents: VecDeque::new(),
                         sub_since: None,
                         pending_ready: false,
                         terminal_pid: None,
@@ -786,6 +799,7 @@ impl Engine {
                         stale: false,
                         agents: Vec::new(),
                         pending_agents: VecDeque::new(),
+                        known_agents: VecDeque::new(),
                         sub_since: None,
                         pending_ready: false,
                         terminal_pid: cap.pid,
@@ -825,6 +839,7 @@ impl Engine {
         if let Some(s) = self.sessions.get_mut(id) {
             s.agents.clear();
             s.pending_agents.clear();
+            s.known_agents.clear();
             s.sub_since = None;
             s.pending_ready = false;
         }
@@ -1102,13 +1117,39 @@ fn claim_description(
 /// Remove a finished subagent. Matches on `agent_id` — which `SubagentStop`
 /// does carry — falling back to the oldest entry if the id is missing or
 /// unknown, so a malformed stop still can't strand a phantom agent on the row.
-fn remove_agent(agents: &mut Vec<AgentRun>, agent_id: Option<&str>) {
+fn remove_agent(agents: &mut Vec<AgentRun>, agent_id: Option<&str>) -> Option<AgentRun> {
     let idx = agent_id
         .and_then(|id| agents.iter().position(|a| a.id == id))
         .unwrap_or(0);
-    if idx < agents.len() {
-        agents.remove(idx);
+    (idx < agents.len()).then(|| agents.remove(idx))
+}
+
+/// Remember a finished agent's description so a later resume can reuse it.
+/// Agents that never had one are recorded too — "we looked and there was no
+/// label" is a real answer, and recording it stops a resume from claiming an
+/// unrelated pending spawn.
+fn remember_agent(known: &mut VecDeque<(String, Option<String>)>, done: AgentRun) {
+    if done.id.is_empty() {
+        return;
     }
+    known.retain(|(id, _)| id != &done.id);
+    if known.len() >= MAX_PENDING_AGENTS {
+        known.pop_front();
+    }
+    known.push_back((done.id, done.description));
+}
+
+/// The description this agent had last time it ran, if we've seen it before.
+/// The outer `Option` distinguishes "never seen" from "seen, had no label".
+fn recall_description(
+    known: &VecDeque<(String, Option<String>)>,
+    agent_id: Option<&str>,
+) -> Option<Option<String>> {
+    let id = agent_id?;
+    known
+        .iter()
+        .find(|(known_id, _)| known_id == id)
+        .map(|(_, desc)| desc.clone())
 }
 
 /// Tools that block on the user the instant they start and emit no
@@ -2388,6 +2429,44 @@ mod tests {
         // new session's first fan-out.
         e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
         assert_eq!(agents_of(&e, "s1")[0].description, None);
+    }
+
+    #[test]
+    fn a_resumed_agent_keeps_its_description() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        e.apply(&spawn_ev("s1", "Explore", "map the widget"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        // Resumed later in the same session with no fresh PreToolUse behind it.
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].description.as_deref(), Some("map the widget"));
+    }
+
+    #[test]
+    fn a_resumed_agent_does_not_steal_another_spawns_description() {
+        let mut e = Engine::new(Duration::from_secs(600), Duration::from_secs(60));
+        e.apply(&ev("UserPromptSubmit", "s1"));
+        // An agent we never saw spawned, so it has no label of its own.
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&agent_ev("SubagentStop", "s1", "a1", "Explore"));
+        // A genuinely new agent is dispatched, then the old one resumes.
+        e.apply(&spawn_ev("s1", "Explore", "the new task"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a1", "Explore"));
+        e.apply(&agent_ev("SubagentStart", "s1", "a2", "Explore"));
+
+        let agents = agents_of(&e, "s1");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].agent_id, "a1");
+        assert_eq!(
+            agents[0].description, None,
+            "resume must not take a2's label"
+        );
+        assert_eq!(agents[1].agent_id, "a2");
+        assert_eq!(agents[1].description.as_deref(), Some("the new task"));
     }
 
     #[test]
