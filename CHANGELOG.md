@@ -8,12 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Widget rows now show **what** each subagent is doing, not just how many are
+  running. Every live agent gets its own line: its type (`Explore`, `Plan`, …),
+  the task it was given, and its own elapsed timer. Long tasks truncate with the
+  full text on hover.
 - The copy-paste hook config in Settings now includes the `beacon-capture`
   command hook, so setting Session Signals up by hand gives you repo and branch
   labels (and click-to-focus) instead of a bare folder name. Thanks
   [@VedantMadane](https://github.com/VedantMadane) — [#36].
 
 ### Fixed
+- A session no longer turns green while its agents are still working. Agents run
+  in the background by default, so the ordinary case was: the main turn ends,
+  the row goes **Ready**, and Session Signals announces "Finished — your turn"
+  with the work still in flight. The row now stays **Working** from the end of
+  the turn until the last agent finishes, and the notification fires at that
+  moment instead.
 - Uninstalling the hooks now also removes the capture script, which embeds the
   listener token. It used to be left on disk, and reopening Settings immediately
   recreated it.
