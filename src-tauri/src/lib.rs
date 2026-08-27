@@ -451,7 +451,10 @@ fn install_hooks(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn uninstall_hooks(app: AppHandle) -> Result<String, String> {
-    hooks::uninstall(current_port(&app)).map(|p| p.display().to_string())
+    let path = hooks::uninstall(current_port(&app))?;
+    // The script embeds the listener token; a clean uninstall takes it with it.
+    capture::remove_script(&app);
+    Ok(path.display().to_string())
 }
 
 #[tauri::command]
@@ -463,10 +466,13 @@ fn hooks_installed() -> bool {
 fn hook_block(app: AppHandle) -> String {
     let port = current_port(&app);
     let token = current_token(&app);
-    // Ensure the capture script exists before emitting a path to it. Users who
-    // only paste the block never press Install, so the script would otherwise
-    // be missing from the app-data dir.
-    let capture_cmd = capture::write_script(&app, port, &token);
+    // Describe the capture script; never create it. Startup writes it
+    // unconditionally, so a copy-paste user has it without ever pressing
+    // Install. Writing here instead would make a getter mutate the disk — and
+    // because the settings window refreshes this block right after Uninstall,
+    // it would silently recreate the token-bearing script the user just asked
+    // us to remove.
+    let capture_cmd = capture::existing_command(&app);
     hooks::hook_block_string(port, &token, capture_cmd.as_deref())
 }
 
@@ -482,10 +488,15 @@ fn regenerate_token(app: AppHandle) -> Result<(), String> {
         let state = app.state::<AppState>();
         *state.token.lock_safe() = fresh.clone();
     }
-    // Re-run the installer so the hooks' header (and capture script) match the
-    // new token. Only if they're actually installed.
+    // The capture script embeds the token, so it has to be rewritten whether or
+    // not our hooks are in settings.json — a copy-paste user's script would
+    // otherwise keep POSTing the old token and get 401'd until the next launch.
+    let port = current_port(&app);
+    capture::write_script(&app, port, &fresh);
+    // Rewriting settings.json, on the other hand, is only ours to do when we
+    // put the hooks there.
     if hooks::is_installed() {
-        install_beacon_hooks_for(&app, current_port(&app), &fresh)?;
+        install_beacon_hooks_for(&app, port, &fresh)?;
     }
     Ok(())
 }

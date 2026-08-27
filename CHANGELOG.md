@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. Every live agent gets its own line: its type (`Explore`, `Plan`, …),
   the task it was given, and its own elapsed timer. Long tasks truncate with the
   full text on hover.
+- The copy-paste hook config in Settings now includes the `beacon-capture`
+  command hook, so setting Session Signals up by hand gives you repo and branch
+  labels (and click-to-focus) instead of a bare folder name. Thanks
+  [@VedantMadane](https://github.com/VedantMadane) — [#36].
 
 ### Fixed
 - A session no longer turns green while its agents are still working. Agents run
@@ -20,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the work still in flight. The row now stays **Working** from the end of
   the turn until the last agent finishes, and the notification fires at that
   moment instead.
+- Uninstalling the hooks now also removes the capture script, which embeds the
+  listener token. It used to be left on disk, and reopening Settings immediately
+  recreated it.
+- Regenerating the listener token now rewrites the capture script even when the
+  hooks were installed by hand, instead of leaving it POSTing a stale token
+  until the next launch.
 - Session Signals no longer holds ~29% CPU (spread across its three processes)
   while sitting idle with a working session on screen — measured at ~1-3% after
   the fix. The widget's breathing ring was drawn as an SVG `<circle>`, and WebKit
@@ -138,6 +148,7 @@ OSS-readiness pass (licensing, docs, tooling, CI, and security hardening).
 - Concurrent sessions no longer block one another; idle sessions no longer turn
   red (they stay visible until a configurable drop window).
 
+[#36]: https://github.com/earsenio/session-signals/pull/36
 [Unreleased]: https://github.com/earsenio/session-signals/compare/v0.4.1...HEAD
 [0.4.1]: https://github.com/earsenio/session-signals/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/earsenio/session-signals/compare/v0.2.0...v0.3.0

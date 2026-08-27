@@ -168,6 +168,11 @@ export default function Settings() {
     refreshHooks();
   }, [flash, refreshHooks]);
 
+  // Whether the printed block actually carries the capture command hook. It is
+  // omitted when the script isn't on disk (hook_block never creates it), and the
+  // note below must not promise what the block doesn't deliver.
+  const hasCaptureHook = hookBlock.includes("beacon-capture");
+
   const copyBlock = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(hookBlock);
@@ -388,8 +393,10 @@ export default function Settings() {
           </p>
           <p className="sHookNote">
             Repo and branch names are resolved by the capture hook itself, inside your terminal, so
-            Session Signals never needs permission to read your project folders. The block below
-            includes that capture hook (and the app writes the script it points at on startup).
+            Session Signals never needs permission to read your project folders.{" "}
+            {hasCaptureHook
+              ? "The block below includes that capture hook, so pasting it is a complete setup."
+              : "The block below covers session state only — the capture script isn’t on disk yet, so repo and branch names need the Install button above."}{" "}
             Sessions that were already running when the hooks last changed show the folder name
             only, until they restart.
           </p>
