@@ -1,8 +1,8 @@
 {
   "name": "cc-beacon",
   "private": true,
-  "version": "0.4.1",
-  "description": "Session Signals \u2014 a lightweight, fully-local desktop status indicator for Claude Code.",
+  "version": "0.4.2",
+  "description": "Session Signals — a lightweight, fully-local desktop status indicator for Claude Code.",
   "license": "MIT",
   "author": "Session Signals contributors",
   "repository": {
