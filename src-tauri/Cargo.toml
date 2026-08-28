@@ -1,6 +1,6 @@
 [package]
 name = "cc-beacon"
-version = "0.4.1"
+version = "0.4.2"
 description = "Session Signals — desktop status indicator for Claude Code"
 authors = ["Session Signals contributors"]
 license = "MIT"
